@@ -86,7 +86,8 @@ def plot_genuine_vs_hn_roc(fpr, tpr, auc: float, path,
         dy = -10 if va == "top" else 10
         ax.annotate(
             f"operating point\nthr {operating_point['threshold']:.4f}\n"
-            f"macro recall {operating_point['macro_recall']:.3f}, "
+            f"{operating_point.get('recall_agg', 'macro')} recall "
+            f"{operating_point['recall']:.3f}, "
             f"spec {operating_point['specificity']:.3f}",
             (x, y), xytext=(14, dy), textcoords="offset points",
             fontsize=8, color=INK_2, va=va,
@@ -158,8 +159,14 @@ def plot_history(csv_path, path) -> None:
     _style_axes(ax1)
     _style_axes(ax2)
 
+    # Old CSVs (pre recall-agg) used macro_recall; keep them plottable.
+    if "recall" in rows[0]:
+        recall_col = "recall"
+        recall_label = f"{rows[0].get('recall_agg', 'macro')} recall (genuine)"
+    else:
+        recall_col, recall_label = "macro_recall", "macro recall (genuine)"
     unit_series = [  # (csv column, label, palette slot)
-        ("macro_recall", "macro recall (genuine)", 0),
+        (recall_col, recall_label, 0),
         ("specificity", "HN specificity", 1),
         ("auroc", "genuine-vs-HN AUROC", 2),
         ("threshold", "operating threshold", 3),

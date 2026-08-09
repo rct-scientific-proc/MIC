@@ -39,8 +39,8 @@ def main() -> None:
     h5 = OUT_ROOT / "smoke.h5"
     out = OUT_ROOT / "run"
 
-    make_dataset(str(h5), num_genuine_classes=2, genuine_per_class=30,
-                 hn_factor=5.0, seed=0)
+    make_dataset(str(h5), num_genuine_classes=5, genuine_per_class=30,
+                 hn_factor=25.0, seed=0, channels=3, image_hw=(128, 128))
 
     common = [
         REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",

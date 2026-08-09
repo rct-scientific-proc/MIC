@@ -74,6 +74,8 @@ def main(argv=None) -> None:
     out_dir = Path(args.out_dir or Path(args.checkpoint).parent / f"eval_{split_name}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    recall_agg = ckpt.get("recall_agg", "macro")
+
     model = build_model(ckpt["arch"], len(classes), pretrained=False).to(device)
     model.load_state_dict(ckpt["model_state"])
 
@@ -82,7 +84,7 @@ def main(argv=None) -> None:
                         pin_memory=device.type == "cuda")
 
     probs, labels = collect_probs(model, loader, device)
-    res = apply_threshold(probs, labels, hn_index, threshold)
+    res = apply_threshold(probs, labels, hn_index, threshold, agg=recall_agg)
     pred = final_prediction(probs, hn_index, threshold)
     cm = confusion_matrix(labels, pred, len(classes))
 
@@ -90,7 +92,7 @@ def main(argv=None) -> None:
         f"checkpoint : {args.checkpoint} (epoch {ckpt['epoch']}, arch {ckpt['arch']})",
         f"dataset    : {args.h5}  split={split_name}  n={len(ds)}",
         f"threshold  : {threshold:.6f} (chosen on validation during training)",
-        f"macro recall (genuine classes) : {res['macro_recall']:.4f}",
+        f"{recall_agg} recall (genuine classes) : {res['recall']:.4f}",
         f"HN specificity at threshold    : {res['specificity']:.4f}",
         f"genuine acceptance rate (TPR)  : {res['tpr']:.4f}",
         "per-class recall:",

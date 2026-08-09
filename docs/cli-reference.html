@@ -242,11 +242,18 @@ class of an accepted sample = argmax over the non-HN classes</div>
   That number is saved inside every checkpoint and reused verbatim by
   <code>evaluate.py</code>. A checkpoint without its threshold is half a model.</p>
 
-  <p><strong>Macro recall (genuine classes).</strong> A genuine sample counts as
-  recalled only if it is accepted (<code>s ≥ t</code>) <em>and</em> classified as its
-  true class. Per-class recalls are averaged with equal weight over the genuine
-  classes present in the split — a rare class counts as much as a common one, so
-  no class can be silently sacrificed.</p>
+  <p><strong>Aggregated recall (genuine classes).</strong> A genuine sample counts
+  as recalled only if it is accepted (<code>s ≥ t</code>) <em>and</em> classified as
+  its true class. Per-class recalls over the genuine classes present in the
+  split are then combined by <code>--recall-agg</code>:</p>
+  <div class="formula">macro     mean(r₁ … r_C)                 (1,1,1,1,0.1) → 0.82
+harmonic  C / Σ(1/r_c)   — 0 if any r=0   (1,1,1,1,0.1) → 0.36
+min       worst single class              (1,1,1,1,0.1) → 0.10</div>
+  <p>The arithmetic mean can hide one collapsed class behind several perfect
+  ones; the harmonic mean (the default) is dominated by the worst classes, so a
+  recall target forces <em>every</em> class to perform. Each per-class recall is
+  monotone in the threshold, and so is every aggregate — the sweep logic is
+  identical for all three.</p>
 
   <p><strong>Hard-negative specificity.</strong> The fraction of hard negatives
   rejected (<code>s &lt; t</code>) at the operating threshold. This is the number the
@@ -426,14 +433,14 @@ class of an accepted sample = argmax over the non-HN classes</div>
 
   <div class="arg" id="t-target-recall">
     <div class="arg-head"><span class="flag">--target-recall</span><span class="badge">float 0–1</span><span class="badge">default: 0.95</span></div>
-    <p>The macro-recall constraint the validation threshold sweep must satisfy.
-    Semantics, precisely: after each epoch, candidate thresholds are every
-    distinct score value in the validation split; the sweep keeps the largest one
-    whose macro recall over genuine classes is ≥ this target, then reports
-    hard-negative specificity at that threshold. If no threshold achieves the
-    target, the epoch records <code>target_met = 0</code> with threshold 0 (accept
-    everything) and the achievable ceiling is logged as
-    <code>max_macro_recall</code>.</p>
+    <p>The recall constraint the validation threshold sweep must satisfy, in the
+    aggregate chosen by <code>--recall-agg</code>. Semantics, precisely: after each
+    epoch, candidate thresholds are every distinct score value in the validation
+    split; the sweep keeps the largest one whose aggregated recall over genuine
+    classes is ≥ this target, then reports hard-negative specificity at that
+    threshold. If no threshold achieves the target, the epoch records
+    <code>target_met = 0</code> with threshold 0 (accept everything) and the
+    achievable ceiling is logged as <code>max_recall</code>.</p>
     <ul>
       <li>It does <em>not</em> change the loss — it defines the operating point and
       the checkpoint ranking.</li>
@@ -443,6 +450,28 @@ class of an accepted sample = argmax over the non-HN classes</div>
       0.99 on a 6-class problem is a much harder constraint than 0.95 because
       <em>every</em> class must clear it on average.</li>
     </ul>
+  </div>
+
+  <div class="arg" id="t-recall-agg">
+    <div class="arg-head"><span class="flag">--recall-agg</span><span class="badge">macro | harmonic | min</span><span class="badge">default: harmonic</span></div>
+    <p>How per-class recalls combine into the single number the target, the
+    sweep, checkpoint selection, and the ramp gate all use (see
+    <a href="#concepts">Core concepts</a>). Motivating failure case: five genuine
+    classes at recalls (1, 1, 1, 1, 0.1) — macro reports 0.82 and can clear a
+    0.8 target while the fifth class is nearly dead; harmonic reports 0.36 and
+    correctly fails, forcing the sweep to a threshold (and training toward a
+    model) that serves every class. Guidance:</p>
+    <ul>
+      <li><code>harmonic</code> (default) — punishes weak classes progressively;
+      any class at exactly 0 recall pins the aggregate to 0.</li>
+      <li><code>macro</code> — the plain average; only appropriate when classes are
+      interchangeable and a weak one is acceptable.</li>
+      <li><code>min</code> — the strictest reading ("target means every class");
+      noisy when validation classes are small (one sample flips recall by 1/n).</li>
+    </ul>
+    <p>The chosen aggregate is stored in checkpoints and in the
+    <code>recall_agg</code> CSV column; <code>evaluate.py</code> reuses it so
+    training and evaluation always report the same statistic.</p>
   </div>
 
   <div class="arg" id="t-imbalance-ratio">
@@ -729,9 +758,10 @@ class of an accepted sample = argmax over the non-HN classes</div>
     <tr><td>train_loss</td><td>mean per-sample focal loss over the epoch's draw</td></tr>
     <tr><td>threshold</td><td>operating threshold chosen by this epoch's validation sweep</td></tr>
     <tr><td>target_met</td><td>1 if some threshold reached <code>--target-recall</code>, else 0</td></tr>
-    <tr><td>macro_recall</td><td>macro recall over genuine classes at the chosen threshold</td></tr>
+    <tr><td>recall</td><td>aggregated recall over genuine classes at the chosen threshold</td></tr>
+    <tr><td>recall_agg</td><td>the aggregate in effect (macro / harmonic / min)</td></tr>
     <tr><td>specificity</td><td>fraction of validation hard negatives rejected at the threshold</td></tr>
-    <tr><td>max_macro_recall</td><td>recall ceiling with everything accepted (threshold → 0)</td></tr>
+    <tr><td>max_recall</td><td>recall ceiling with everything accepted (threshold → 0)</td></tr>
     <tr><td>auroc</td><td>genuine-vs-hard-negative AUROC of the score s</td></tr>
     <tr><td>hn_alpha</td><td>focal alpha of the HN class in effect this epoch (ramp-aware)</td></tr>
     <tr><td>imbalance_ratio</td><td>ratio in effect this epoch (ramp-aware)</td></tr>

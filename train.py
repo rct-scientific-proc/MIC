@@ -31,13 +31,14 @@ from torch.utils.data import DataLoader
 
 from dataset import SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset, validate_h5
 from losses import FocalLoss
-from metrics import collect_probs, genuine_vs_hn_roc, sweep_threshold
+from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
+                     sweep_threshold)
 from model import ARCHS, build_model
 from sampler import HardNegativeMiner, ImbalanceCapSampler
 
 CSV_FIELDS = [
-    "epoch", "train_loss", "threshold", "target_met", "macro_recall",
-    "specificity", "max_macro_recall", "auroc", "hn_alpha", "imbalance_ratio",
+    "epoch", "train_loss", "threshold", "target_met", "recall", "recall_agg",
+    "specificity", "max_recall", "auroc", "hn_alpha", "imbalance_ratio",
     "ramp_progress", "lr", "epoch_time_s",
 ]
 
@@ -70,7 +71,12 @@ def parse_args(argv=None) -> argparse.Namespace:
 
     o = p.add_argument_group("objective")
     o.add_argument("--target-recall", type=float, default=0.95,
-                   help="target macro recall over genuine classes")
+                   help="target aggregated recall over genuine classes")
+    o.add_argument("--recall-agg", choices=RECALL_AGGREGATES, default="harmonic",
+                   help="how per-class recalls combine for the target: macro "
+                        "(arithmetic mean; one collapsed class can hide behind "
+                        "strong ones), harmonic (dominated by the worst classes; "
+                        "default), or min (strictest, worst single class)")
     o.add_argument("--imbalance-ratio", type=float, default=math.inf,
                    help="max hard negatives per epoch = ratio * genuine count (1..inf)")
     o.add_argument("--focal-gamma", type=float, default=2.0)
@@ -162,9 +168,9 @@ def ramp_values(args, ramp_progress: int, n_genuine: int, n_hn: int) -> tuple[fl
     return hn_alpha, ratio
 
 
-def validate(model, loader, device, hn_index, target_recall) -> dict:
+def validate(model, loader, device, hn_index, target_recall, recall_agg) -> dict:
     probs, labels = collect_probs(model, loader, device)
-    op = sweep_threshold(probs, labels, hn_index, target_recall)
+    op = sweep_threshold(probs, labels, hn_index, target_recall, agg=recall_agg)
     try:
         _, _, auroc = genuine_vs_hn_roc(probs, labels, hn_index)
     except ValueError:
@@ -175,13 +181,13 @@ def validate(model, loader, device, hn_index, target_recall) -> dict:
 
 def selection_key(op: dict) -> tuple:
     """Checkpoint ranking: meeting the target dominates; then specificity at
-    the target; then macro recall (the tie-breaker while the target is out of
-    reach)."""
+    the target; then aggregated recall (the tie-breaker while the target is
+    out of reach)."""
     spec = op["specificity"]
     if math.isnan(spec):
         spec = -math.inf
     return (int(op["target_met"]), spec if op["target_met"] else -math.inf,
-            op["macro_recall"])
+            op["recall"])
 
 
 def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classes,
@@ -197,6 +203,7 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
         "arch": args.arch,
         "imagenet_norm": args.imagenet_norm,
         "threshold": op["threshold"],
+        "recall_agg": args.recall_agg,
         "val_metrics": op,
         "best_key": best_key,
         "miner_state": miner.state_dict() if miner is not None else None,
@@ -278,7 +285,8 @@ def main(argv=None) -> None:
 
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer,
                                      scaler, device, amp, miner=miner)
-        op = validate(model, val_loader, device, hn_index, args.target_recall)
+        op = validate(model, val_loader, device, hn_index, args.target_recall,
+                      args.recall_agg)
         dt = time.time() - t0
 
         if op["target_met"] and args.ramp_epochs > 0:
@@ -287,9 +295,9 @@ def main(argv=None) -> None:
         writer.writerow({
             "epoch": epoch, "train_loss": f"{train_loss:.6f}",
             "threshold": f"{op['threshold']:.6f}", "target_met": int(op["target_met"]),
-            "macro_recall": f"{op['macro_recall']:.6f}",
+            "recall": f"{op['recall']:.6f}", "recall_agg": op["recall_agg"],
             "specificity": f"{op['specificity']:.6f}",
-            "max_macro_recall": f"{op['max_macro_recall']:.6f}",
+            "max_recall": f"{op['max_recall']:.6f}",
             "auroc": f"{op['auroc']:.6f}", "hn_alpha": f"{hn_alpha:.4f}",
             "imbalance_ratio": ratio, "ramp_progress": ramp_progress,
             "lr": args.lr, "epoch_time_s": f"{dt:.1f}",
@@ -301,7 +309,8 @@ def main(argv=None) -> None:
         marker = " *" if improved else ""
         print(
             f"epoch {epoch:3d}  loss {train_loss:.4f}  "
-            f"recall {op['macro_recall']:.4f}{'' if op['target_met'] else ' (below target)'}  "
+            f"{op['recall_agg']}-recall {op['recall']:.4f}"
+            f"{'' if op['target_met'] else ' (below target)'}  "
             f"spec {op['specificity']:.4f}  thr {op['threshold']:.4f}  "
             f"auroc {op['auroc']:.4f}  {dt:.1f}s{marker}"
         )

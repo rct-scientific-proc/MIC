@@ -7,9 +7,18 @@ Score and decision rule (the operating point every metric hangs off):
     predicted class of an accepted sample = argmax over non-HN classes
 
 A genuine sample counts as *recalled* only if it is accepted AND classified as
-its true class. Macro recall averages per-class recall over the genuine
-classes present in the split. Hard-negative specificity is the fraction of
-hard negatives rejected (s < threshold).
+its true class. Per-class recalls over the genuine classes present in the
+split are combined by a configurable aggregate:
+
+    macro     arithmetic mean — can hide one collapsed class behind several
+              perfect ones ((1,1,1,1,0.1) -> 0.82)
+    harmonic  harmonic mean — dominated by the worst classes ((1,1,1,1,0.1)
+              -> 0.36; any class at 0 -> 0), so a recall target forces every
+              class to perform
+    min       worst single class — strictest, noisy when classes are small
+
+Hard-negative specificity is the fraction of hard negatives rejected
+(s < threshold).
 
 sweep_threshold picks the LARGEST threshold whose macro recall still meets the
 target — recall is monotone non-increasing in the threshold, so this is the
@@ -37,6 +46,29 @@ def collect_probs(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
     return torch.cat(probs).numpy(), torch.cat(labels).numpy()
 
 
+RECALL_AGGREGATES = ("macro", "harmonic", "min")
+
+
+def aggregate_recall(recalls: np.ndarray, agg: str, axis: int = 0) -> np.ndarray:
+    """Combine per-class recalls along `axis` (values or curves).
+
+    harmonic returns 0 wherever any class recall is 0 — the limit of the
+    harmonic mean, and the behavior that makes a dead class unmissable.
+    """
+    recalls = np.asarray(recalls, dtype=np.float64)
+    if agg == "macro":
+        return recalls.mean(axis=axis)
+    if agg == "harmonic":
+        with np.errstate(divide="ignore"):
+            inv = np.where(recalls > 0, 1.0 / np.where(recalls > 0, recalls, 1.0),
+                           np.inf)
+        hm = recalls.shape[axis] / inv.sum(axis=axis)
+        return np.where(np.isfinite(hm), hm, 0.0)
+    if agg == "min":
+        return recalls.min(axis=axis)
+    raise ValueError(f"agg must be one of {RECALL_AGGREGATES}, got '{agg}'")
+
+
 def genuineness_scores(probs: np.ndarray, hn_index: int) -> np.ndarray:
     return 1.0 - probs[:, hn_index]
 
@@ -52,16 +84,22 @@ def sweep_threshold(
     labels: np.ndarray,
     hn_index: int,
     target_recall: float,
+    agg: str = "macro",
 ) -> dict:
     """Choose the operating threshold on (typically validation) data.
 
+    Every per-class recall is monotone non-decreasing as the threshold falls,
+    so each aggregate (macro/harmonic/min) is too — the first cut meeting the
+    target is still the maximum-specificity operating point.
+
     Returns a dict with:
       threshold        chosen operating point (accept if s >= threshold)
-      target_met       whether the target macro recall is achievable at all
-      macro_recall     macro recall over genuine classes at the threshold
+      target_met       whether the target aggregated recall is achievable
+      recall           aggregated recall over genuine classes at the threshold
+      recall_agg       the aggregate used ('macro' | 'harmonic' | 'min')
       per_class_recall {class_index: recall} at the threshold
       specificity      fraction of hard negatives rejected (nan if none present)
-      max_macro_recall macro recall with everything accepted (threshold ~ 0)
+      max_recall       aggregated recall with everything accepted (threshold ~ 0)
     """
     n = len(labels)
     scores = genuineness_scores(probs, hn_index)
@@ -82,7 +120,7 @@ def sweep_threshold(
     cum_recall = {
         c: np.cumsum(correct_s & (labels_s == c)) / class_totals[c] for c in class_ids
     }
-    macro = np.mean([cum_recall[c] for c in class_ids], axis=0)
+    agg_curve = aggregate_recall(np.stack([cum_recall[c] for c in class_ids]), agg)
 
     n_hn = int((~genuine).sum())
     cum_hn_accepted = np.cumsum(~genuine[order])
@@ -91,7 +129,7 @@ def sweep_threshold(
     # s >= t always takes whole tie groups).
     cuts = np.append(np.flatnonzero(np.diff(s_sorted) != 0), n - 1)
 
-    meets = macro[cuts] >= target_recall
+    meets = agg_curve[cuts] >= target_recall
     if meets.any():
         k = cuts[int(np.argmax(meets))]  # first (highest-threshold) cut meeting target
         threshold = float(s_sorted[k])
@@ -104,15 +142,17 @@ def sweep_threshold(
     return {
         "threshold": threshold,
         "target_met": target_met,
-        "macro_recall": float(macro[k]),
+        "recall": float(agg_curve[k]),
+        "recall_agg": agg,
         "per_class_recall": {c: float(cum_recall[c][k]) for c in class_ids},
         "specificity": float(1.0 - cum_hn_accepted[k] / n_hn) if n_hn else float("nan"),
-        "max_macro_recall": float(macro[-1]),
+        "max_recall": float(agg_curve[-1]),
     }
 
 
 def apply_threshold(
-    probs: np.ndarray, labels: np.ndarray, hn_index: int, threshold: float
+    probs: np.ndarray, labels: np.ndarray, hn_index: int, threshold: float,
+    agg: str = "macro",
 ) -> dict:
     """Evaluate a FIXED threshold (e.g. the stored one, on the test split)."""
     scores = genuineness_scores(probs, hn_index)
@@ -125,9 +165,12 @@ def apply_threshold(
     per_class = {c: float(correct[labels == c].mean()) for c in class_ids}
 
     n_hn = int((~genuine).sum())
+    recall = (float(aggregate_recall(np.array(list(per_class.values())), agg))
+              if per_class else float("nan"))
     return {
         "threshold": float(threshold),
-        "macro_recall": float(np.mean(list(per_class.values()))) if per_class else float("nan"),
+        "recall": recall,
+        "recall_agg": agg,
         "per_class_recall": per_class,
         "specificity": float((~accepted[~genuine]).mean()) if n_hn else float("nan"),
         "tpr": float(accepted[genuine].mean()),  # genuine acceptance rate
