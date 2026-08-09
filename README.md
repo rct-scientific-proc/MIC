@@ -7,8 +7,11 @@ CSV logs, PNG plots), so it works on offline machines.
 
 ## Objective & operating point
 
-1. Reach a configurable **macro recall** over the genuine (non-hard-negative)
-   classes.
+1. Reach a configurable **recall target** over the genuine (non-hard-negative)
+   classes. Per-class recalls are combined by `--recall-agg`: `harmonic`
+   (default — dominated by the worst classes, so one collapsed class can't
+   hide behind strong ones), `macro` (arithmetic mean), or `min` (worst
+   single class).
 2. Subject to that, maximize **hard-negative specificity**.
 
 Recall/specificity are threshold-dependent, so the recall target is enforced
@@ -36,7 +39,10 @@ python train.py data.h5 --arch resnet18 --epochs 50 --target-recall 0.95 \
 
 Key options (see `python train.py --help` for all):
 
-- `--target-recall` — macro-recall target the threshold sweep must meet.
+- `--target-recall` — recall target the threshold sweep must meet.
+- `--recall-agg` — how per-class recalls aggregate for that target
+  (`harmonic` default / `macro` / `min`). Example: recalls (1, 1, 1, 1, 0.1)
+  give macro 0.82 but harmonic 0.36 — harmonic makes the target honest.
 - `--imbalance-ratio R` — at most `R x genuine` hard negatives per epoch
   (1..inf). When this forces subsampling, hard negatives are **mined**: a
   per-sample EMA of training error drives the draw, with a

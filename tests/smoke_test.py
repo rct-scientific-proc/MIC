@@ -44,7 +44,7 @@ def main() -> None:
 
     common = [
         REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
-        "--batch-size", "32", "--target-recall", "0.8",
+        "--batch-size", "32", "--target-recall", "0.98",
         "--imbalance-ratio", "3.0", "--imbalance-ratio-start", "1.0",
         "--ramp-epochs", "2", "--hn-alpha", "0.25", "--hn-alpha-end", "1.0",
         "--out-dir", out, "--patience", "0", "--seed", "1",
@@ -57,7 +57,7 @@ def main() -> None:
     # resume and train long enough for BN stats to settle and the model to
     # learn (random init needs ~15 epochs on this data); workers=0 is much
     # faster at this size
-    run(*common, "--epochs", "25", "--workers", "0",
+    run(*common, "--epochs", "40", "--workers", "0",
         "--resume", out / "last.pt")
 
     run(REPO / "evaluate.py", out / "best.pt", h5, "--out-dir", out / "eval")
