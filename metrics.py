@@ -130,6 +130,7 @@ def apply_threshold(
         "macro_recall": float(np.mean(list(per_class.values()))) if per_class else float("nan"),
         "per_class_recall": per_class,
         "specificity": float((~accepted[~genuine]).mean()) if n_hn else float("nan"),
+        "tpr": float(accepted[genuine].mean()),  # genuine acceptance rate
     }
 
 
