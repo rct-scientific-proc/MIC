@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<title>mic — CLI Reference</title>
+<style>
+  :root {
+    --surface: #fcfcfb;
+    --plane: #f6f6f3;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --line: #e1e0d9;
+    --accent: #2a78d6;
+    --accent-ink: #1c5cab;
+    --accent-wash: #eef4fc;
+    --chip-bg: #f0efec;
+    --warn-wash: #fdf6e7;
+    --warn-edge: #eda100;
+    --code-bg: #f4f3f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface: #1a1a19;
+      --plane: #212120;
+      --ink: #f2f1ec;
+      --ink-2: #c3c2b7;
+      --muted: #898781;
+      --line: #33332f;
+      --accent: #3987e5;
+      --accent-ink: #6da7ec;
+      --accent-wash: #1d2836;
+      --chip-bg: #2a2a28;
+      --warn-wash: #2b2416;
+      --warn-edge: #c98500;
+      --code-bg: #232322;
+    }
+  }
+  :root[data-theme="dark"] {
+    --surface: #1a1a19;
+    --plane: #212120;
+    --ink: #f2f1ec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --line: #33332f;
+    --accent: #3987e5;
+    --accent-ink: #6da7ec;
+    --accent-wash: #1d2836;
+    --chip-bg: #2a2a28;
+    --warn-wash: #2b2416;
+    --warn-edge: #c98500;
+    --code-bg: #232322;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--surface);
+    color: var(--ink);
+    font: 16px/1.65 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 74ch; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+
+  code, pre, .flag, .eyebrow, .badge, .toc a {
+    font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
+  }
+  code {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0.08em 0.35em;
+    font-size: 0.86em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; }
+
+  h1 { font-size: 1.9rem; line-height: 1.2; margin: 0.4rem 0 0.5rem; letter-spacing: -0.015em; text-wrap: balance; }
+  h2 { font-size: 1.32rem; margin: 0 0 0.25rem; letter-spacing: -0.01em; text-wrap: balance; }
+  h3 { font-size: 1.02rem; margin: 2.2rem 0 0.6rem; color: var(--ink-2); }
+  p { margin: 0.65rem 0; }
+  a { color: var(--accent-ink); text-decoration: none; }
+  a:hover, a:focus-visible { text-decoration: underline; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+  .eyebrow {
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+  }
+  .lede { color: var(--ink-2); font-size: 1.02rem; margin-top: 0; }
+
+  header.doc { border-bottom: 1px solid var(--line); padding-bottom: 1.6rem; margin-bottom: 1.6rem; }
+
+  .toc {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+    gap: 0.4rem 1.2rem;
+    background: var(--plane);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1.4rem 0 0;
+    font-size: 0.85rem;
+  }
+  .toc a { color: var(--ink-2); }
+  .toc a:hover { color: var(--accent-ink); }
+
+  section.tool { border-top: 1px solid var(--line); margin-top: 3.2rem; padding-top: 1.8rem; }
+  section.tool > p.syn { color: var(--ink-2); }
+
+  .arg {
+    margin: 1.5rem 0;
+    padding-left: 1rem;
+    border-left: 2px solid var(--line);
+  }
+  .arg:target { border-left-color: var(--accent); }
+  .arg-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-bottom: 0.15rem;
+  }
+  .flag {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--accent-ink);
+  }
+  .badge {
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    color: var(--ink-2);
+    background: var(--chip-bg);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.1em 0.6em;
+    white-space: nowrap;
+  }
+  .arg p { margin: 0.45rem 0; font-size: 0.95rem; }
+  .arg ul { margin: 0.45rem 0; padding-left: 1.2rem; font-size: 0.95rem; }
+  .arg li { margin: 0.25rem 0; }
+
+  .callout {
+    background: var(--warn-wash);
+    border-left: 3px solid var(--warn-edge);
+    border-radius: 0 6px 6px 0;
+    padding: 0.65rem 0.9rem;
+    margin: 0.7rem 0;
+    font-size: 0.92rem;
+  }
+  .callout .tag {
+    font-weight: 700;
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--warn-edge);
+    display: block;
+    margin-bottom: 0.15rem;
+  }
+  .note {
+    background: var(--accent-wash);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+    padding: 0.65rem 0.9rem;
+    margin: 0.7rem 0;
+    font-size: 0.92rem;
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.88rem;
+    margin: 0.8rem 0;
+  }
+  .table-wrap { overflow-x: auto; }
+  th, td { text-align: left; padding: 0.42rem 0.7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; }
+  td:first-child { font-family: "Cascadia Code", Consolas, ui-monospace, monospace; font-size: 0.82rem; white-space: nowrap; }
+  td { color: var(--ink-2); }
+  td:first-child { color: var(--ink); }
+
+  .formula {
+    font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
+    font-size: 0.85rem;
+    background: var(--plane);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.6rem 0.9rem;
+    margin: 0.6rem 0;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  footer { margin-top: 4rem; border-top: 1px solid var(--line); padding-top: 1rem; color: var(--muted); font-size: 0.8rem; }
+</style>
+
+<main>
+<header class="doc">
+  <span class="eyebrow">mic · command-line reference</span>
+  <h1>Training pipeline CLI, argument by argument</h1>
+  <p class="lede">Every flag across the four entry points — what it does, its default,
+  the math behind it, and how it interacts with the rest of the pipeline.
+  Dataset layout is defined in <code>h5_format.md</code>; design rationale in <code>TODO.md</code>.</p>
+
+  <nav class="toc" aria-label="Contents">
+    <a href="#concepts">0 · Core concepts</a>
+    <a href="#train">1 · train.py</a>
+    <a href="#evaluate">2 · evaluate.py</a>
+    <a href="#download">3 · download_weights.py</a>
+    <a href="#synth">4 · tests/make_synthetic_h5.py</a>
+    <a href="#outputs">5 · Outputs: CSV &amp; checkpoints</a>
+    <a href="#recipes">6 · Recipes</a>
+  </nav>
+</header>
+
+<section id="concepts">
+  <span class="eyebrow">Section 0</span>
+  <h2>Core concepts the flags refer to</h2>
+
+  <p><strong>Genuineness score and operating threshold.</strong> The model is a
+  K-class softmax classifier whose last class is always <code>hard_negative</code>.
+  Every decision hangs off a single per-sample score:</p>
+  <div class="formula">s = P(not hard_negative) = 1 − softmax(logits)[hard_negative]
+
+accept as genuine  ⇔  s ≥ threshold
+class of an accepted sample = argmax over the non-HN classes</div>
+  <p>The threshold is <em>not</em> trained. After every epoch, the validation split is
+  swept and the <em>largest</em> threshold whose macro recall still meets
+  <code>--target-recall</code> is chosen — recall is monotone in the threshold, so
+  the largest passing value is the one with maximum hard-negative specificity.
+  That number is saved inside every checkpoint and reused verbatim by
+  <code>evaluate.py</code>. A checkpoint without its threshold is half a model.</p>
+
+  <p><strong>Macro recall (genuine classes).</strong> A genuine sample counts as
+  recalled only if it is accepted (<code>s ≥ t</code>) <em>and</em> classified as its
+  true class. Per-class recalls are averaged with equal weight over the genuine
+  classes present in the split — a rare class counts as much as a common one, so
+  no class can be silently sacrificed.</p>
+
+  <p><strong>Hard-negative specificity.</strong> The fraction of hard negatives
+  rejected (<code>s &lt; t</code>) at the operating threshold. This is the number the
+  pipeline is ultimately trying to maximize, subject to the recall constraint.</p>
+
+  <p><strong>Checkpoint selection key.</strong> "Best" is ranked by the tuple:</p>
+  <div class="formula">( target met?,  specificity at threshold,  macro recall )</div>
+  <p>Meeting the recall target dominates everything; among target-meeting epochs,
+  higher specificity wins; while the target is still out of reach, macro recall is
+  the tie-breaker so early progress is still captured.</p>
+</section>
+
+<section class="tool" id="train">
+  <span class="eyebrow">Section 1</span>
+  <h2>train.py</h2>
+  <p class="syn"><code>python train.py DATA.h5 [options]</code> — trains, validates,
+  logs, checkpoints. Writes <code>last.pt</code>, <code>best.pt</code>, and
+  <code>metrics.csv</code> into the output directory.</p>
+
+  <h3>Positional &amp; output</h3>
+
+  <div class="arg" id="t-h5">
+    <div class="arg-head"><span class="flag">h5</span><span class="badge">positional · path</span><span class="badge">required</span></div>
+    <p>The dataset file in the <code>h5_format.md</code> layout. On startup the file is
+    validated: all arrays share the first axis, image shape is
+    <code>(N,&nbsp;H,&nbsp;W,&nbsp;C)</code> with C ∈ {1, 3}, the last class is
+    <code>hard_negative</code>, split values are {0, 1, 2}, and the <code>gt</code> flag is
+    checked for consistency with <code>labels == hard_negative</code>. Any violation
+    aborts before training starts. Training reads split 0, validation split 1;
+    split 2 is never touched by this script.</p>
+  </div>
+
+  <div class="arg" id="t-out-dir">
+    <div class="arg-head"><span class="flag">--out-dir</span><span class="badge">path</span><span class="badge">default: runs/&lt;timestamp&gt;</span></div>
+    <p>Where checkpoints and <code>metrics.csv</code> land. Reusing a directory appends
+    to its existing <code>metrics.csv</code> — intended for <code>--resume</code> into the
+    same directory; for a fresh experiment give a fresh directory.</p>
+  </div>
+
+  <h3>Model group</h3>
+
+  <div class="arg" id="t-arch">
+    <div class="arg-head"><span class="flag">--arch</span><span class="badge">resnet18 | resnet34 | resnet50</span><span class="badge">default: resnet18</span></div>
+    <p>Backbone size. All three take the same 3×224×224 input and get a fresh
+    K-class linear head. resnet18/34 (11.7M / 21.8M params) are usually enough for
+    snippet-scale imagery and train markedly faster; resnet50 (25.6M, bottleneck
+    blocks) buys capacity when classes differ in fine texture rather than gross
+    shape. The architecture is recorded in the checkpoint, so
+    <code>evaluate.py</code> rebuilds the right one automatically.</p>
+  </div>
+
+  <div class="arg" id="t-no-pretrained">
+    <div class="arg-head"><span class="flag">--no-pretrained</span><span class="badge">switch</span><span class="badge">default: off (pretrained)</span></div>
+    <p>Train from random initialization instead of ImageNet weights. Default
+    behavior (flag absent) loads ImageNet weights from <code>--weights-path</code> if
+    given, else from torchvision's cache (<code>TORCH_HOME</code>), downloading when
+    online.</p>
+    <div class="callout"><span class="tag">Gotcha</span>
+    From random init with few batches per epoch, BatchNorm running statistics lag
+    the batch statistics: for the first ~10–15 epochs validation metrics can look
+    collapsed (recall stuck at chance) while train loss is near zero. It
+    self-recovers. Pretrained weights start from sane ImageNet BN stats and
+    largely avoid the transient — one more reason they are the default.</div>
+  </div>
+
+  <div class="arg" id="t-weights-path">
+    <div class="arg-head"><span class="flag">--weights-path</span><span class="badge">path (.pth)</span><span class="badge">default: none</span></div>
+    <p>Load ImageNet weights from an explicit file instead of the network/cache —
+    the offline-machine workflow. Produce the file with
+    <code>download_weights.py</code> on a connected box and copy it over. The state
+    dict is loaded into the stock 1000-class model, then the head is replaced, so
+    the file must be the unmodified torchvision ImageNet checkpoint for the
+    chosen <code>--arch</code> (they are not interchangeable across arches).
+    Takes precedence over the cache; ignored if <code>--no-pretrained</code> is set.</p>
+  </div>
+
+  <h3>Training group</h3>
+
+  <div class="arg" id="t-epochs">
+    <div class="arg-head"><span class="flag">--epochs</span><span class="badge">int</span><span class="badge">default: 50</span></div>
+    <p>Upper bound on epochs; early stopping (<code>--patience</code>) usually ends the
+    run first. With <code>--resume</code> this is the <em>absolute</em> epoch count, not
+    additional epochs — resuming an 8-epoch run with <code>--epochs 10</code> trains
+    epochs 8 and 9.</p>
+  </div>
+
+  <div class="arg" id="t-batch-size">
+    <div class="arg-head"><span class="flag">--batch-size</span><span class="badge">int</span><span class="badge">default: 64</span></div>
+    <p>Used for both training and validation loaders. Images are 3×224×224 floats
+    after the input pipeline, so memory scales as ~0.6&nbsp;MB per sample before
+    activations; drop this first if CUDA runs out of memory, or raise it with
+    <code>--amp</code> on. Batch size also sets how many samples share one BatchNorm
+    statistic — very small values (&lt;16) make BN noisy on top of the class-mix
+    noise inherent to imbalanced sampling.</p>
+  </div>
+
+  <div class="arg" id="t-lr">
+    <div class="arg-head"><span class="flag">--lr</span><span class="badge">float</span><span class="badge">default: 3e-4</span></div>
+    <p>AdamW learning rate, constant for the whole run (no scheduler). 3e-4 is a
+    solid fine-tuning rate for pretrained backbones; from-scratch training
+    (<code>--no-pretrained</code>) sometimes wants 1e-3. If the ramp is enabled and
+    metrics oscillate when hard-negative pressure steps up, lowering the LR is the
+    first knob to reach for.</p>
+  </div>
+
+  <div class="arg" id="t-weight-decay">
+    <div class="arg-head"><span class="flag">--weight-decay</span><span class="badge">float</span><span class="badge">default: 1e-4</span></div>
+    <p>AdamW's decoupled weight decay — L2-style shrinkage applied directly to
+    weights rather than through the gradient. Mild regularization; raise toward
+    1e-2 if the genuine classes are tiny and the model overfits them, lower it if
+    underfitting a large dataset.</p>
+  </div>
+
+  <div class="arg" id="t-seed">
+    <div class="arg-head"><span class="flag">--seed</span><span class="badge">int</span><span class="badge">default: 0</span></div>
+    <p>Seeds Python, NumPy, and torch RNGs, and parameterizes the sampler: the
+    epoch-e draw uses generator seed <code>seed·100003&nbsp;+&nbsp;e</code>, so a given
+    (seed, epoch) pair always selects and shuffles the same hard negatives —
+    which is what makes <code>--resume</code> line up with the original schedule.
+    cuDNN autotuning is left on, so GPU runs are reproducible in structure but not
+    bit-exact.</p>
+  </div>
+
+  <div class="arg" id="t-device">
+    <div class="arg-head"><span class="flag">--device</span><span class="badge">cuda | cpu</span><span class="badge">default: auto</span></div>
+    <p>Auto picks CUDA when available. Forcing <code>cpu</code> is occasionally useful
+    to rule out GPU nondeterminism or to train while the GPU is busy.
+    <code>--amp</code> is silently inert on CPU.</p>
+  </div>
+
+  <div class="arg" id="t-workers">
+    <div class="arg-head"><span class="flag">--workers</span><span class="badge">int</span><span class="badge">default: 0</span></div>
+    <p>DataLoader worker processes. The dataset opens its h5 handle lazily inside
+    each worker (never pickling an open handle), so multiprocess loading is safe
+    on Windows' spawn start method. Economics: each worker re-spawns per epoch on
+    Windows, costing a few seconds — for small datasets <code>0</code> is genuinely
+    faster; for datasets where decode/resize dominates, 2–8 workers keep the GPU
+    fed. Rule of thumb: raise it only when GPU utilization is low and epoch time
+    is dominated by loading.</p>
+  </div>
+
+  <div class="arg" id="t-amp">
+    <div class="arg-head"><span class="flag">--amp</span><span class="badge">switch</span><span class="badge">default: off</span></div>
+    <p>Mixed-precision training (CUDA only): forward/loss under autocast in
+    fp16/bf16 with a gradient scaler guarding against underflow. Typically
+    1.5–2× faster and ~40% less memory on resnet50-class models with no accuracy
+    cost. Validation always computes probabilities in fp32 after the logits, so
+    threshold sweeps are unaffected. The scaler state is checkpointed and
+    restored on resume.</p>
+  </div>
+
+  <div class="arg" id="t-patience">
+    <div class="arg-head"><span class="flag">--patience</span><span class="badge">int</span><span class="badge">default: 10 · 0 = off</span></div>
+    <p>Early stopping: end the run after N consecutive epochs without improving
+    the selection key <em>(target met, specificity, macro recall)</em> — see
+    <a href="#concepts">Core concepts</a>. Because the key is exactly the training
+    objective, "no improvement" means no better operating point, not merely no
+    lower loss. Set <code>0</code> to always run the full <code>--epochs</code>.</p>
+    <div class="callout"><span class="tag">Interaction</span>
+    With <code>--ramp-epochs</code>, specificity often dips right after each pressure
+    step and recovers a few epochs later. Give patience enough headroom to ride
+    the ramp out — patience &lt; ramp recovery time can stop the run mid-ramp.</div>
+  </div>
+
+  <div class="arg" id="t-resume">
+    <div class="arg-head"><span class="flag">--resume</span><span class="badge">path (.pt)</span><span class="badge">default: none</span></div>
+    <p>Continue from a checkpoint (normally <code>last.pt</code>). Restores model
+    weights, optimizer state, AMP scaler, the epoch counter, the best-so-far
+    selection key, the hard-negative miner's error scores, and ramp progress —
+    the run picks up as if uninterrupted. Point <code>--out-dir</code> at the same
+    directory to keep one continuous <code>metrics.csv</code>. Hyperparameters are
+    <em>not</em> read back from the checkpoint: pass the same flags again (or
+    deliberately different ones — resuming with a changed LR is allowed).</p>
+  </div>
+
+  <h3>Objective group</h3>
+
+  <div class="arg" id="t-target-recall">
+    <div class="arg-head"><span class="flag">--target-recall</span><span class="badge">float 0–1</span><span class="badge">default: 0.95</span></div>
+    <p>The macro-recall constraint the validation threshold sweep must satisfy.
+    Semantics, precisely: after each epoch, candidate thresholds are every
+    distinct score value in the validation split; the sweep keeps the largest one
+    whose macro recall over genuine classes is ≥ this target, then reports
+    hard-negative specificity at that threshold. If no threshold achieves the
+    target, the epoch records <code>target_met = 0</code> with threshold 0 (accept
+    everything) and the achievable ceiling is logged as
+    <code>max_macro_recall</code>.</p>
+    <ul>
+      <li>It does <em>not</em> change the loss — it defines the operating point and
+      the checkpoint ranking.</li>
+      <li>It gates the pressure ramp: ramp progress only advances on epochs where
+      the target was met.</li>
+      <li>Raising it trades specificity away one-for-one along the ROC curve;
+      0.99 on a 6-class problem is a much harder constraint than 0.95 because
+      <em>every</em> class must clear it on average.</li>
+    </ul>
+  </div>
+
+  <div class="arg" id="t-imbalance-ratio">
+    <div class="arg-head"><span class="flag">--imbalance-ratio</span><span class="badge">float ≥ 1, inf ok</span><span class="badge">default: inf</span></div>
+    <p>Caps how many hard negatives the model sees per epoch, relative to the
+    genuine population:</p>
+    <div class="formula">hn_budget = min( n_hard_negatives,  round(ratio × n_genuine) )</div>
+    <p>All genuine samples appear every epoch; only the hard negatives are
+    subsampled. <code>1.0</code> means a balanced epoch (as many hard negatives as
+    genuine samples); <code>inf</code> (the default) disables the cap and every hard
+    negative is seen every epoch. When the cap binds, <em>which</em> hard negatives
+    are drawn is decided by the miner (below) — so this flag is also the switch
+    that makes mining matter at all: with an infinite ratio the miner has nothing
+    to choose.</p>
+  </div>
+
+  <div class="arg" id="t-focal-gamma">
+    <div class="arg-head"><span class="flag">--focal-gamma</span><span class="badge">float</span><span class="badge">default: 2.0</span></div>
+    <p>The focusing exponent in the focal loss:</p>
+    <div class="formula">FL(p_y) = −alpha[y] · (1 − p_y)^gamma · log(p_y)</div>
+    <p>γ = 0 recovers plain (alpha-weighted) cross-entropy; γ = 2 (the paper's
+    default) down-weights already-confident samples by (1−p)² so the gradient
+    concentrates on hard, misclassified examples — exactly the regime of a
+    heavily imbalanced set where easy hard-negatives would otherwise drown the
+    signal. Higher γ (3–5) focuses harder but can destabilize early training when
+    <em>everything</em> is misclassified.</p>
+  </div>
+
+  <div class="arg" id="t-hn-alpha">
+    <div class="arg-head"><span class="flag">--hn-alpha</span><span class="badge">float</span><span class="badge">default: 0.25</span></div>
+    <p>The focal alpha weight of the <code>hard_negative</code> class; every genuine
+    class has alpha 1. At 0.25, a hard-negative's loss contribution is quartered:
+    the model is punished lightly for accepting hard negatives and fully for
+    missing genuine samples — the recall-first stance of early training. Raise it
+    toward 1.0 (directly, or via the ramp) to increase the cost of false accepts
+    once recall is established. Values above 1 are legal and flip the emphasis
+    entirely toward specificity.</p>
+  </div>
+
+  <h3>Hard-negative pressure ramp</h3>
+  <p class="syn">One coordinated schedule for "start recall-focused, then turn up the
+  pressure". Both endpoints interpolate linearly over <code>--ramp-epochs</code>
+  steps, and <strong>progress advances only on epochs whose validation met the
+  recall target</strong> — the ramp holds position whenever recall slips below
+  target, so pressure never outruns the constraint.</p>
+
+  <div class="arg" id="t-ramp-epochs">
+    <div class="arg-head"><span class="flag">--ramp-epochs</span><span class="badge">int</span><span class="badge">default: 0 (no ramp)</span></div>
+    <p>Number of ramp steps between the start and end values. <code>0</code> disables
+    the schedule: <code>--hn-alpha</code> and <code>--imbalance-ratio</code> apply
+    as-is from epoch 0 (end-values, with no interpolation). Note the unit is
+    <em>successful epochs</em>, not epochs: a run that meets the target every epoch
+    finishes the ramp in exactly this many epochs; a struggling run takes longer.
+    Ramp position is checkpointed and restored by <code>--resume</code>.</p>
+  </div>
+
+  <div class="arg" id="t-hn-alpha-end">
+    <div class="arg-head"><span class="flag">--hn-alpha-end</span><span class="badge">float</span><span class="badge">default: = --hn-alpha</span></div>
+    <p>The hard-negative alpha at full ramp. At progress step k of N:</p>
+    <div class="formula">alpha(k) = hn_alpha + (k / N) · (hn_alpha_end − hn_alpha)</div>
+    <p>Typical use: <code>--hn-alpha 0.1 --hn-alpha-end 1.0</code> — nearly ignore
+    hard negatives until recall is secured, then weight them as full citizens.
+    Leaving it unset keeps alpha constant while the ratio still ramps.</p>
+  </div>
+
+  <div class="arg" id="t-imbalance-ratio-start">
+    <div class="arg-head"><span class="flag">--imbalance-ratio-start</span><span class="badge">float ≥ 1</span><span class="badge">default: = --imbalance-ratio</span></div>
+    <p>The imbalance ratio at ramp step 0, interpolating toward
+    <code>--imbalance-ratio</code> at full ramp. Set it low (e.g. <code>1.0</code>) to
+    begin with balanced epochs and let hard-negative volume grow only as recall
+    holds. An infinite endpoint is handled in <em>budget space</em>: inf is treated
+    as "the ratio that admits every hard negative", so the per-epoch hard-negative
+    count still grows smoothly instead of jumping to everything at the final
+    step.</p>
+  </div>
+
+  <h3>Hard-negative mining</h3>
+  <p class="syn">When the imbalance cap forces subsampling, mining decides which hard
+  negatives fill the budget. Each hard negative carries an EMA of its focal loss
+  (<code>score ← 0.7·score + 0.3·loss</code>, first observation taken directly);
+  unseen samples start at a high sentinel score so everything gets tried before
+  anything is written off. High-score (poorly handled) hard negatives are drawn
+  preferentially via weighted sampling without replacement. Scores persist in
+  checkpoints.</p>
+
+  <div class="arg" id="t-no-mining">
+    <div class="arg-head"><span class="flag">--no-mining</span><span class="badge">switch</span><span class="badge">default: off (mining on)</span></div>
+    <p>Disable error-driven selection; the budget is filled uniformly at random
+    each epoch. Useful as an ablation baseline, or when hard-negative losses are
+    so uniform that mining adds nothing. Irrelevant when
+    <code>--imbalance-ratio inf</code> (nothing is subsampled).</p>
+  </div>
+
+  <div class="arg" id="t-mining-random-frac">
+    <div class="arg-head"><span class="flag">--mining-random-frac</span><span class="badge">float 0–1</span><span class="badge">default: 0.2</span></div>
+    <p>The exploration knob: this share of the hard-negative budget is drawn
+    uniformly from the not-yet-mined remainder, the rest by error score. Without
+    it, a hard negative scored low early (perhaps under a stale model) might
+    never be revisited even though the current model would now fail on it —
+    scores only update when a sample is actually seen. <code>0</code> is pure
+    exploitation (risk of stale scores), <code>1</code> is equivalent to
+    <code>--no-mining</code>. 0.2 keeps roughly one in five slots refreshing the
+    score pool every epoch.</p>
+  </div>
+
+  <h3>Data group</h3>
+
+  <div class="arg" id="t-imagenet-norm">
+    <div class="arg-head"><span class="flag">--imagenet-norm</span><span class="badge">switch</span><span class="badge">default: off</span></div>
+    <p>Input pipeline, always: uint8 HWC → CHW tensor → bilinear resize to
+    224×224 (antialiased) → scale to [0,1]; grayscale is repeated to 3 channels.
+    With this flag, ImageNet channel statistics
+    (mean 0.485/0.456/0.406, std 0.229/0.224/0.225) are additionally applied —
+    matching what the pretrained backbone saw during ImageNet training, which
+    can help transfer. Off by default per project convention (plain [0,1]
+    inputs).</p>
+    <div class="note">The flag is recorded in the checkpoint and
+    <code>evaluate.py</code> replays it automatically — train/eval preprocessing can
+    never silently diverge.</div>
+  </div>
+</section>
+
+<section class="tool" id="evaluate">
+  <span class="eyebrow">Section 2</span>
+  <h2>evaluate.py</h2>
+  <p class="syn"><code>python evaluate.py CHECKPOINT.pt DATA.h5 [options]</code> —
+  runs a frozen checkpoint on a split using the checkpoint's <strong>stored</strong>
+  threshold. It never re-tunes the operating point, which is what keeps a test
+  evaluation honest: the threshold was chosen on validation, the test split only
+  ever sees it applied.</p>
+
+  <div class="arg" id="e-checkpoint">
+    <div class="arg-head"><span class="flag">checkpoint</span><span class="badge">positional · path</span><span class="badge">required</span></div>
+    <p><code>best.pt</code> or <code>last.pt</code> from a training run. The checkpoint
+    supplies the architecture, class list, normalization flag, and threshold —
+    you cannot pass a mismatched <code>--arch</code> by accident because there is no
+    such flag here. The class list is cross-checked against the dataset and a
+    mismatch aborts.</p>
+  </div>
+
+  <div class="arg" id="e-h5">
+    <div class="arg-head"><span class="flag">h5</span><span class="badge">positional · path</span><span class="badge">required</span></div>
+    <p>The dataset to evaluate on — normally the same file used for training, but
+    any file with an identical class list works (e.g. a newly collected test set
+    exported with the same classes).</p>
+  </div>
+
+  <div class="arg" id="e-split">
+    <div class="arg-head"><span class="flag">--split</span><span class="badge">0 | 1 | 2</span><span class="badge">default: 2 (test)</span></div>
+    <p>Which split to score: 0 train, 1 validate, 2 test. Evaluating split 1
+    should closely reproduce the training log's numbers for that epoch (a useful
+    sanity check); split 0 measures memorization more than generalization.</p>
+  </div>
+
+  <div class="arg" id="e-batch">
+    <div class="arg-head"><span class="flag">--batch-size</span><span class="badge">int</span><span class="badge">default: 64</span></div>
+    <p>Inference batch size. Pure throughput knob — no gradients are stored, so
+    this can usually be several times the training batch size.</p>
+  </div>
+
+  <div class="arg" id="e-device">
+    <div class="arg-head"><span class="flag">--device</span><span class="badge">cuda | cpu</span><span class="badge">default: auto</span></div>
+    <p>Same semantics as training. CPU evaluation is fine for moderate test sets.</p>
+  </div>
+
+  <div class="arg" id="e-workers">
+    <div class="arg-head"><span class="flag">--workers</span><span class="badge">int</span><span class="badge">default: 0</span></div>
+    <p>DataLoader workers; same Windows economics as in training. A single pass
+    rarely needs more than 0–2.</p>
+  </div>
+
+  <div class="arg" id="e-out-dir">
+    <div class="arg-head"><span class="flag">--out-dir</span><span class="badge">path</span><span class="badge">default: &lt;ckpt dir&gt;/eval_&lt;split&gt;</span></div>
+    <p>Destination for <code>report.txt</code>, <code>confusion.csv</code> /
+    <code>confusion.png</code>, <code>roc_genuine_vs_hn.png</code> (operating point
+    marked), <code>roc_per_class.png</code>, and <code>history.png</code>. With more
+    than 8 genuine classes the per-class ROC keeps the worst-AUC classes and the
+    report lists which were omitted — nothing is dropped silently.</p>
+  </div>
+
+  <div class="arg" id="e-history">
+    <div class="arg-head"><span class="flag">--history-csv</span><span class="badge">path</span><span class="badge">default: metrics.csv beside the checkpoint</span></div>
+    <p>Source for the metric-vs-epoch plot. The default finds the training log
+    automatically when the checkpoint still sits in its run directory; pass this
+    explicitly if the checkpoint was copied elsewhere. Missing file ⇒ the history
+    plot is skipped and noted in the report, everything else still runs.</p>
+  </div>
+</section>
+
+<section class="tool" id="download">
+  <span class="eyebrow">Section 3</span>
+  <h2>download_weights.py</h2>
+  <p class="syn"><code>python download_weights.py [options]</code> — pre-fetches the
+  ImageNet <code>.pth</code> files on a connected machine so offline boxes can train
+  by copying a folder. Files already present are skipped, so re-running is
+  cheap.</p>
+
+  <div class="arg" id="d-out-dir">
+    <div class="arg-head"><span class="flag">--out-dir</span><span class="badge">path</span><span class="badge">default: pretrained</span></div>
+    <p>Destination folder; created if missing. Copy this folder to the offline
+    machine and point <code>train.py --weights-path</code> at
+    <code>&lt;folder&gt;/&lt;arch&gt;.pth</code>.</p>
+  </div>
+
+  <div class="arg" id="d-archs">
+    <div class="arg-head"><span class="flag">--archs</span><span class="badge">list</span><span class="badge">default: all three</span></div>
+    <p>Subset of <code>resnet18 resnet34 resnet50</code> to fetch (≈45 / 84 / 98 MB).
+    The URLs are the exact weight versions <code>model.py</code> loads
+    (IMAGENET1K_V1 for 18/34, IMAGENET1K_V2 for 50), so a file fetched here is
+    guaranteed to match what <code>--weights-path</code> expects.</p>
+  </div>
+</section>
+
+<section class="tool" id="synth">
+  <span class="eyebrow">Section 4</span>
+  <h2>tests/make_synthetic_h5.py</h2>
+  <p class="syn"><code>python tests/make_synthetic_h5.py OUT.h5 [options]</code> —
+  generates a small learnable dataset in the exact <code>h5_format.md</code> layout.
+  Genuine classes are brightness bands; hard negatives sit halfway between two
+  neighboring bands, so they genuinely "look like" a class. Doubles as a worked
+  example of the format.</p>
+
+  <div class="arg" id="s-out">
+    <div class="arg-head"><span class="flag">out</span><span class="badge">positional · path</span><span class="badge">required</span></div>
+    <p>Output <code>.h5</code> path (overwritten if present).</p>
+  </div>
+
+  <div class="arg" id="s-num-classes">
+    <div class="arg-head"><span class="flag">--num-classes</span><span class="badge">int</span><span class="badge">default: 2</span></div>
+    <p>Number of genuine classes (<code>band0…bandN</code>); <code>hard_negative</code>
+    is always appended as the last class. More classes squeeze the brightness
+    bands closer together, making the problem harder.</p>
+  </div>
+
+  <div class="arg" id="s-gpc">
+    <div class="arg-head"><span class="flag">--genuine-per-class</span><span class="badge">int</span><span class="badge">default: 30</span></div>
+    <p>Genuine training samples per class. Validation and test each get one third
+    of this (minimum 2) per class.</p>
+  </div>
+
+  <div class="arg" id="s-hn-factor">
+    <div class="arg-head"><span class="flag">--hn-factor</span><span class="badge">float</span><span class="badge">default: 5.0</span></div>
+    <p>Hard negatives per genuine sample, per split — the dataset's imbalance
+    severity. At the default, each split is 5:1 hard-negative-heavy, enough for
+    <code>--imbalance-ratio</code> caps and mining to actually engage.</p>
+  </div>
+
+  <div class="arg" id="s-size">
+    <div class="arg-head"><span class="flag">--size</span><span class="badge">int</span><span class="badge">default: 28</span></div>
+    <p>Image height and width. Kept small on purpose — the input pipeline resizes
+    to 224 anyway, and small sources keep the file and the test fast.</p>
+  </div>
+
+  <div class="arg" id="s-channels">
+    <div class="arg-head"><span class="flag">--channels</span><span class="badge">1 | 3</span><span class="badge">default: 1</span></div>
+    <p>Grayscale or RGB source images — use <code>1</code> to exercise the
+    grayscale→RGB repeat path in the dataset.</p>
+  </div>
+
+  <div class="arg" id="s-seed">
+    <div class="arg-head"><span class="flag">--seed</span><span class="badge">int</span><span class="badge">default: 0</span></div>
+    <p>RNG seed for band noise and hard-negative placement; same seed, same file.</p>
+  </div>
+</section>
+
+<section class="tool" id="outputs">
+  <span class="eyebrow">Section 5</span>
+  <h2>Outputs: metrics.csv &amp; checkpoint contents</h2>
+
+  <h3>metrics.csv columns</h3>
+  <div class="table-wrap"><table>
+    <tr><th>column</th><th>meaning</th></tr>
+    <tr><td>epoch</td><td>0-based epoch index</td></tr>
+    <tr><td>train_loss</td><td>mean per-sample focal loss over the epoch's draw</td></tr>
+    <tr><td>threshold</td><td>operating threshold chosen by this epoch's validation sweep</td></tr>
+    <tr><td>target_met</td><td>1 if some threshold reached <code>--target-recall</code>, else 0</td></tr>
+    <tr><td>macro_recall</td><td>macro recall over genuine classes at the chosen threshold</td></tr>
+    <tr><td>specificity</td><td>fraction of validation hard negatives rejected at the threshold</td></tr>
+    <tr><td>max_macro_recall</td><td>recall ceiling with everything accepted (threshold → 0)</td></tr>
+    <tr><td>auroc</td><td>genuine-vs-hard-negative AUROC of the score s</td></tr>
+    <tr><td>hn_alpha</td><td>focal alpha of the HN class in effect this epoch (ramp-aware)</td></tr>
+    <tr><td>imbalance_ratio</td><td>ratio in effect this epoch (ramp-aware)</td></tr>
+    <tr><td>ramp_progress</td><td>ramp steps completed (0…<code>--ramp-epochs</code>)</td></tr>
+    <tr><td>lr</td><td>learning rate (constant)</td></tr>
+    <tr><td>epoch_time_s</td><td>wall-clock seconds for train + validate</td></tr>
+  </table></div>
+
+  <h3>What a checkpoint contains</h3>
+  <p>Both <code>last.pt</code> and <code>best.pt</code> store: model weights, optimizer
+  and AMP-scaler state, epoch index, the full CLI config, the class list and
+  hard-negative index, the <code>--imagenet-norm</code> flag, <strong>the operating
+  threshold</strong>, that epoch's validation metrics, the best-so-far selection
+  key, miner scores, and ramp progress. Everything needed to resume training
+  <em>or</em> to run correct inference lives in the one file.</p>
+</section>
+
+<section class="tool" id="recipes">
+  <span class="eyebrow">Section 6</span>
+  <h2>Recipes</h2>
+
+  <h3>Standard run on a real dataset</h3>
+  <pre><code>python train.py data.h5 --arch resnet18 --epochs 60 ^
+    --target-recall 0.95 --imbalance-ratio 3.0 --amp ^
+    --out-dir runs/exp1</code></pre>
+
+  <h3>Recall-first, then squeeze specificity (full ramp)</h3>
+  <pre><code>python train.py data.h5 --arch resnet34 --epochs 80 --amp ^
+    --target-recall 0.95 ^
+    --imbalance-ratio 4.0 --imbalance-ratio-start 1.0 ^
+    --hn-alpha 0.1 --hn-alpha-end 1.0 --ramp-epochs 10 ^
+    --patience 15 --out-dir runs/exp2</code></pre>
+  <p class="syn">Starts balanced with hard negatives nearly ignored; each epoch that
+  holds 0.95 recall steps alpha and volume up one notch of ten.</p>
+
+  <h3>Offline machine</h3>
+  <pre><code># connected box
+python download_weights.py --out-dir pretrained
+# offline box, after copying the folder
+python train.py data.h5 --arch resnet50 ^
+    --weights-path pretrained/resnet50.pth --amp --out-dir runs/exp3</code></pre>
+
+  <h3>Evaluate, then compare against validation</h3>
+  <pre><code>python evaluate.py runs/exp2/best.pt data.h5              # test split
+python evaluate.py runs/exp2/best.pt data.h5 --split 1    # sanity check</code></pre>
+
+  <h3>Resume after an interruption</h3>
+  <pre><code>python train.py data.h5 --arch resnet34 --epochs 80 --amp ^
+    --target-recall 0.95 --imbalance-ratio 4.0 --imbalance-ratio-start 1.0 ^
+    --hn-alpha 0.1 --hn-alpha-end 1.0 --ramp-epochs 10 --patience 15 ^
+    --out-dir runs/exp2 --resume runs/exp2/last.pt</code></pre>
+  <p class="syn">Same flags, same out-dir, plus <code>--resume</code> —
+  <code>--epochs</code> is the absolute total, and the CSV continues in place.</p>
+</section>
+
+<footer>
+  mic CLI reference · generated from the source of train.py, evaluate.py,
+  download_weights.py, and tests/make_synthetic_h5.py · h5 layout: h5_format.md
+</footer>
+</main>
+
+</body>
+</html>
