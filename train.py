@@ -33,12 +33,12 @@ from dataset import SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset, validate_h5
 from losses import FocalLoss
 from metrics import collect_probs, genuine_vs_hn_roc, sweep_threshold
 from model import ARCHS, build_model
-from sampler import ImbalanceCapSampler
+from sampler import HardNegativeMiner, ImbalanceCapSampler
 
 CSV_FIELDS = [
     "epoch", "train_loss", "threshold", "target_met", "macro_recall",
     "specificity", "max_macro_recall", "auroc", "hn_alpha", "imbalance_ratio",
-    "lr", "epoch_time_s",
+    "ramp_progress", "lr", "epoch_time_s",
 ]
 
 
@@ -77,6 +77,26 @@ def parse_args(argv=None) -> argparse.Namespace:
     o.add_argument("--hn-alpha", type=float, default=0.25,
                    help="focal alpha for the hard_negative class (genuine classes = 1)")
 
+    r = p.add_argument_group(
+        "hard-negative pressure ramp",
+        "optional schedule: start recall-focused, then increase hard-negative "
+        "pressure. Progress advances one step per epoch whose validation meets "
+        "the recall target, and holds otherwise.",
+    )
+    r.add_argument("--ramp-epochs", type=int, default=0,
+                   help="number of ramp steps (0 = no ramp; constant values)")
+    r.add_argument("--hn-alpha-end", type=float, default=None,
+                   help="hn alpha at full ramp (default: same as --hn-alpha)")
+    r.add_argument("--imbalance-ratio-start", type=float, default=None,
+                   help="starting imbalance ratio (default: same as --imbalance-ratio; "
+                        "set lower, e.g. 1.0, to begin with few hard negatives)")
+
+    mi = p.add_argument_group("hard-negative mining")
+    mi.add_argument("--no-mining", action="store_true",
+                    help="uniform hard-negative subsampling instead of error-driven")
+    mi.add_argument("--mining-random-frac", type=float, default=0.2,
+                    help="share of the hard-negative budget drawn uniformly at random")
+
     d = p.add_argument_group("data")
     d.add_argument("--imagenet-norm", action="store_true",
                    help="ImageNet mean/std normalization (default: just /255)")
@@ -90,7 +110,8 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp) -> float:
+def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
+                    miner=None) -> float:
     model.train()
     total_loss, total_n = 0.0, 0
     for imgs, labs, idxs in loader:
@@ -106,9 +127,39 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp) ->
         scaler.step(optimizer)
         scaler.update()
 
+        if miner is not None:
+            miner.update(idxs, per_sample)
+
         total_loss += float(loss.detach()) * len(labs)
         total_n += len(labs)
     return total_loss / max(total_n, 1)
+
+
+def ramp_values(args, ramp_progress: int, n_genuine: int, n_hn: int) -> tuple[float, float]:
+    """(hn_alpha, imbalance_ratio) at the given ramp progress.
+
+    Linear interpolation over --ramp-epochs steps. An infinite ratio endpoint
+    is interpolated in budget space (inf == the ratio that admits every hard
+    negative), so the hard-negative count still grows smoothly.
+    """
+    alpha_end = args.hn_alpha_end if args.hn_alpha_end is not None else args.hn_alpha
+    ratio_start = (args.imbalance_ratio_start
+                   if args.imbalance_ratio_start is not None else args.imbalance_ratio)
+    ratio_end = args.imbalance_ratio
+
+    if args.ramp_epochs <= 0:
+        return alpha_end, ratio_end
+
+    f = min(1.0, ramp_progress / args.ramp_epochs)
+    full_ratio = max(1.0, n_hn / max(n_genuine, 1))  # ratio admitting all HN
+    rs = full_ratio if math.isinf(ratio_start) else ratio_start
+    re = full_ratio if math.isinf(ratio_end) else ratio_end
+
+    hn_alpha = args.hn_alpha + f * (alpha_end - args.hn_alpha)
+    ratio = max(1.0, rs + f * (re - rs))
+    if f >= 1.0 and math.isinf(ratio_end):
+        ratio = math.inf
+    return hn_alpha, ratio
 
 
 def validate(model, loader, device, hn_index, target_recall) -> dict:
@@ -134,7 +185,7 @@ def selection_key(op: dict) -> tuple:
 
 
 def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classes,
-                    hn_index, op, best_key) -> None:
+                    hn_index, op, best_key, miner=None, ramp_progress=0) -> None:
     torch.save({
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
@@ -148,6 +199,8 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
         "threshold": op["threshold"],
         "val_metrics": op,
         "best_key": best_key,
+        "miner_state": miner.state_dict() if miner is not None else None,
+        "ramp_progress": ramp_progress,
     }, path)
 
 
@@ -171,8 +224,14 @@ def main(argv=None) -> None:
     train_ds = H5SnippetDataset(args.h5, SPLIT_TRAIN, imagenet_norm=args.imagenet_norm)
     val_ds = H5SnippetDataset(args.h5, SPLIT_VAL, imagenet_norm=args.imagenet_norm)
 
+    miner = None if args.no_mining else HardNegativeMiner(train_ds.labels, hn_index)
+    n_genuine = int((train_ds.labels != hn_index).sum())
+    n_hn = int((train_ds.labels == hn_index).sum())
+
+    hn_alpha0, ratio0 = ramp_values(args, 0, n_genuine, n_hn)
     sampler = ImbalanceCapSampler(
-        train_ds.labels, hn_index, ratio=args.imbalance_ratio, seed=args.seed,
+        train_ds.labels, hn_index, ratio=ratio0, miner=miner,
+        random_frac=args.mining_random_frac, seed=args.seed,
     )
     loader_kw = dict(num_workers=args.workers, pin_memory=device.type == "cuda")
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler,
@@ -182,13 +241,14 @@ def main(argv=None) -> None:
     model = build_model(args.arch, len(classes), pretrained=not args.no_pretrained,
                         weights_path=args.weights_path).to(device)
     criterion = FocalLoss(len(classes), hn_index, gamma=args.focal_gamma,
-                          hn_alpha=args.hn_alpha).to(device)
+                          hn_alpha=hn_alpha0).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
 
     start_epoch = 0
     best_key = None
+    ramp_progress = 0
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
@@ -196,6 +256,9 @@ def main(argv=None) -> None:
         scaler.load_state_dict(ckpt["scaler_state"])
         start_epoch = ckpt["epoch"] + 1
         best_key = ckpt.get("best_key")
+        ramp_progress = ckpt.get("ramp_progress", 0)
+        if miner is not None and ckpt.get("miner_state") is not None:
+            miner.load_state_dict(ckpt["miner_state"])
         print(f"resumed from {args.resume} at epoch {start_epoch}")
 
     csv_path = out_dir / "metrics.csv"
@@ -208,11 +271,18 @@ def main(argv=None) -> None:
     epochs_since_best = 0
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
+        hn_alpha, ratio = ramp_values(args, ramp_progress, n_genuine, n_hn)
+        criterion.set_hn_alpha(hn_alpha)
+        sampler.set_ratio(ratio)
         sampler.set_epoch(epoch)
+
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer,
-                                     scaler, device, amp)
+                                     scaler, device, amp, miner=miner)
         op = validate(model, val_loader, device, hn_index, args.target_recall)
         dt = time.time() - t0
+
+        if op["target_met"] and args.ramp_epochs > 0:
+            ramp_progress = min(ramp_progress + 1, args.ramp_epochs)
 
         writer.writerow({
             "epoch": epoch, "train_loss": f"{train_loss:.6f}",
@@ -220,9 +290,9 @@ def main(argv=None) -> None:
             "macro_recall": f"{op['macro_recall']:.6f}",
             "specificity": f"{op['specificity']:.6f}",
             "max_macro_recall": f"{op['max_macro_recall']:.6f}",
-            "auroc": f"{op['auroc']:.6f}", "hn_alpha": f"{args.hn_alpha:.4f}",
-            "imbalance_ratio": sampler.ratio, "lr": args.lr,
-            "epoch_time_s": f"{dt:.1f}",
+            "auroc": f"{op['auroc']:.6f}", "hn_alpha": f"{hn_alpha:.4f}",
+            "imbalance_ratio": ratio, "ramp_progress": ramp_progress,
+            "lr": args.lr, "epoch_time_s": f"{dt:.1f}",
         })
         csv_file.flush()
 
@@ -236,18 +306,17 @@ def main(argv=None) -> None:
             f"auroc {op['auroc']:.4f}  {dt:.1f}s{marker}"
         )
 
+        ckpt_kw = dict(model=model, optimizer=optimizer, scaler=scaler, epoch=epoch,
+                       args=args, classes=classes, hn_index=hn_index, op=op,
+                       miner=miner, ramp_progress=ramp_progress)
         if improved:
             best_key = key
             epochs_since_best = 0
-            save_checkpoint(out_dir / "best.pt", model=model, optimizer=optimizer,
-                            scaler=scaler, epoch=epoch, args=args, classes=classes,
-                            hn_index=hn_index, op=op, best_key=best_key)
+            save_checkpoint(out_dir / "best.pt", best_key=best_key, **ckpt_kw)
         else:
             epochs_since_best += 1
 
-        save_checkpoint(out_dir / "last.pt", model=model, optimizer=optimizer,
-                        scaler=scaler, epoch=epoch, args=args, classes=classes,
-                        hn_index=hn_index, op=op, best_key=best_key)
+        save_checkpoint(out_dir / "last.pt", best_key=best_key, **ckpt_kw)
 
         if args.patience and epochs_since_best >= args.patience:
             print(f"early stop: no improvement for {args.patience} epochs")
