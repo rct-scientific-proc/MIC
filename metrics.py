@@ -32,14 +32,21 @@ from __future__ import annotations
 import numpy as np
 import torch
 from torchmetrics.functional.classification import binary_auroc, binary_roc
+from tqdm import tqdm
 
 
 @torch.no_grad()
-def collect_probs(model, loader, device) -> tuple[np.ndarray, np.ndarray]:
-    """Run the model over a loader; return (probs (N, K) float32, labels (N,))."""
+def collect_probs(model, loader, device, desc: str | None = None,
+                  progress: bool = True) -> tuple[np.ndarray, np.ndarray]:
+    """Run the model over a loader; return (probs (N, K) float32, labels (N,)).
+
+    Shows a transient batch progress bar when `progress` (labelled `desc`);
+    the bar clears on completion so summary lines stay the persistent log.
+    """
     model.eval()
     probs, labels = [], []
-    for imgs, labs, _ in loader:
+    bar = tqdm(loader, desc=desc, unit="batch", leave=False, disable=not progress)
+    for imgs, labs, _ in bar:
         logits = model(imgs.to(device, non_blocking=True))
         probs.append(torch.softmax(logits.float(), dim=1).cpu())
         labels.append(labs)

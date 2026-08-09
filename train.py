@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from dataset import SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset, validate_h5
 from losses import FocalLoss
@@ -67,6 +68,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     t.add_argument("--amp", action="store_true", help="mixed precision (CUDA only)")
     t.add_argument("--patience", type=int, default=10,
                    help="early-stop after N epochs without improvement (0 = off)")
+    t.add_argument("--no-progress", action="store_true",
+                   help="disable per-batch progress bars (for logged runs)")
     t.add_argument("--resume", default=None, help="checkpoint to resume from")
 
     o = p.add_argument_group("objective")
@@ -117,10 +120,11 @@ def seed_everything(seed: int) -> None:
 
 
 def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
-                    miner=None) -> float:
+                    miner=None, desc: str = "train", progress: bool = True) -> float:
     model.train()
     total_loss, total_n = 0.0, 0
-    for imgs, labs, idxs in loader:
+    bar = tqdm(loader, desc=desc, unit="batch", leave=False, disable=not progress)
+    for imgs, labs, idxs in bar:
         imgs = imgs.to(device, non_blocking=True)
         labs = labs.to(device, non_blocking=True)
 
@@ -138,6 +142,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
 
         total_loss += float(loss.detach()) * len(labs)
         total_n += len(labs)
+        bar.set_postfix(loss=f"{total_loss / total_n:.4f}")
     return total_loss / max(total_n, 1)
 
 
@@ -168,8 +173,10 @@ def ramp_values(args, ramp_progress: int, n_genuine: int, n_hn: int) -> tuple[fl
     return hn_alpha, ratio
 
 
-def validate(model, loader, device, hn_index, target_recall, recall_agg) -> dict:
-    probs, labels = collect_probs(model, loader, device)
+def validate(model, loader, device, hn_index, target_recall, recall_agg,
+             desc: str = "validate", progress: bool = True) -> dict:
+    probs, labels = collect_probs(model, loader, device, desc=desc,
+                                  progress=progress)
     op = sweep_threshold(probs, labels, hn_index, target_recall, agg=recall_agg)
     try:
         _, _, auroc = genuine_vs_hn_roc(probs, labels, hn_index)
@@ -283,10 +290,13 @@ def main(argv=None) -> None:
         sampler.set_ratio(ratio)
         sampler.set_epoch(epoch)
 
+        progress = not args.no_progress
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer,
-                                     scaler, device, amp, miner=miner)
+                                     scaler, device, amp, miner=miner,
+                                     desc=f"epoch {epoch} train", progress=progress)
         op = validate(model, val_loader, device, hn_index, args.target_recall,
-                      args.recall_agg)
+                      args.recall_agg, desc=f"epoch {epoch} validate",
+                      progress=progress)
         dt = time.time() - t0
 
         if op["target_met"] and args.ramp_epochs > 0:

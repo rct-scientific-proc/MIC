@@ -418,6 +418,16 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     the ramp out — patience &lt; ramp recovery time can stop the run mid-ramp.</div>
   </div>
 
+  <div class="arg" id="t-no-progress">
+    <div class="arg-head"><span class="flag">--no-progress</span><span class="badge">switch</span><span class="badge">default: off (bars shown)</span></div>
+    <p>Disables the per-batch tqdm progress bars (one per training epoch with a
+    live running-loss readout, one per validation pass). The bars are transient
+    — they clear on completion so the per-epoch summary lines remain the
+    persistent console record. Pass this flag when redirecting output to a log
+    file or running under a scheduler, where carriage-return animation turns
+    into noise.</p>
+  </div>
+
   <div class="arg" id="t-resume">
     <div class="arg-head"><span class="flag">--resume</span><span class="badge">path (.pt)</span><span class="badge">default: none</span></div>
     <p>Continue from a checkpoint (normally <code>last.pt</code>). Restores model
@@ -641,6 +651,12 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     <div class="arg-head"><span class="flag">--workers</span><span class="badge">int</span><span class="badge">default: 0</span></div>
     <p>DataLoader workers; same Windows economics as in training. A single pass
     rarely needs more than 0–2.</p>
+  </div>
+
+  <div class="arg" id="e-no-progress">
+    <div class="arg-head"><span class="flag">--no-progress</span><span class="badge">switch</span><span class="badge">default: off (bar shown)</span></div>
+    <p>Disables the inference progress bar; same log-friendliness rationale as
+    the training flag.</p>
   </div>
 
   <div class="arg" id="e-out-dir">

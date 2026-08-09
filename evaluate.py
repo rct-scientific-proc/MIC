@@ -48,6 +48,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="default: <checkpoint dir>/eval_<split>")
     p.add_argument("--history-csv", default=None,
                    help="metrics.csv to plot (default: next to the checkpoint)")
+    p.add_argument("--no-progress", action="store_true",
+                   help="disable the inference progress bar (for logged runs)")
     return p.parse_args(argv)
 
 
@@ -83,7 +85,9 @@ def main(argv=None) -> None:
     loader = DataLoader(ds, batch_size=args.batch_size, num_workers=args.workers,
                         pin_memory=device.type == "cuda")
 
-    probs, labels = collect_probs(model, loader, device)
+    probs, labels = collect_probs(model, loader, device,
+                                  desc=f"evaluate {split_name}",
+                                  progress=not args.no_progress)
     res = apply_threshold(probs, labels, hn_index, threshold, agg=recall_agg)
     pred = final_prediction(probs, hn_index, threshold)
     cm = confusion_matrix(labels, pred, len(classes))
