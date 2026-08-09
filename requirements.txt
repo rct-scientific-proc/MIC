@@ -1,0 +1,5 @@
+h5py>=3.10
+matplotlib>=3.8
+torch>=2.2
+torchvision>=0.17
+torchmetrics>=1.3
