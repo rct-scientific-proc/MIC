@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<title>mic — Focal Loss, In Depth</title>
+<style>
+  :root {
+    --surface: #fcfcfb;
+    --plane: #f6f6f3;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --line: #e1e0d9;
+    --accent: #2a78d6;
+    --accent-ink: #1c5cab;
+    --accent-wash: #eef4fc;
+    --chip-bg: #f0efec;
+    --warn-wash: #fdf6e7;
+    --warn-edge: #eda100;
+    --code-bg: #f4f3f0;
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface: #1a1a19;
+      --plane: #212120;
+      --ink: #f2f1ec;
+      --ink-2: #c3c2b7;
+      --muted: #898781;
+      --line: #33332f;
+      --accent: #3987e5;
+      --accent-ink: #6da7ec;
+      --accent-wash: #1d2836;
+      --chip-bg: #2a2a28;
+      --warn-wash: #2b2416;
+      --warn-edge: #c98500;
+      --code-bg: #232322;
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    }
+  }
+  :root[data-theme="dark"] {
+    --surface: #1a1a19;
+    --plane: #212120;
+    --ink: #f2f1ec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --line: #33332f;
+    --accent: #3987e5;
+    --accent-ink: #6da7ec;
+    --accent-wash: #1d2836;
+    --chip-bg: #2a2a28;
+    --warn-wash: #2b2416;
+    --warn-edge: #c98500;
+    --code-bg: #232322;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--surface);
+    color: var(--ink);
+    font: 16px/1.65 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 74ch; margin: 0 auto; padding: 3rem 1.25rem 5rem; }
+
+  code, pre, .eyebrow, .toc a { font-family: "Cascadia Code", Consolas, ui-monospace, monospace; }
+  code {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0.08em 0.35em;
+    font-size: 0.86em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+  pre code { background: none; border: none; padding: 0; font-size: inherit; }
+
+  h1 { font-size: 1.9rem; line-height: 1.2; margin: 0.4rem 0 0.5rem; letter-spacing: -0.015em; text-wrap: balance; }
+  h2 { font-size: 1.32rem; margin: 0 0 0.25rem; letter-spacing: -0.01em; text-wrap: balance; }
+  h3 { font-size: 1.02rem; margin: 2rem 0 0.6rem; color: var(--ink-2); }
+  p { margin: 0.65rem 0; }
+  a { color: var(--accent-ink); text-decoration: none; }
+  a:hover, a:focus-visible { text-decoration: underline; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  ul { margin: 0.65rem 0; padding-left: 1.3rem; }
+  li { margin: 0.3rem 0; }
+
+  .eyebrow {
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+  }
+  .lede { color: var(--ink-2); font-size: 1.02rem; margin-top: 0; }
+  header.doc { border-bottom: 1px solid var(--line); padding-bottom: 1.6rem; margin-bottom: 1.6rem; }
+
+  .toc {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+    gap: 0.4rem 1.2rem;
+    background: var(--plane);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 1.4rem 0 0;
+    font-size: 0.85rem;
+  }
+  .toc a { color: var(--ink-2); }
+  .toc a:hover { color: var(--accent-ink); }
+
+  section { border-top: 1px solid var(--line); margin-top: 3rem; padding-top: 1.7rem; }
+  section:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+
+  .formula {
+    font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
+    font-size: 0.85rem;
+    background: var(--plane);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.6rem 0.9rem;
+    margin: 0.6rem 0;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .callout {
+    background: var(--warn-wash);
+    border-left: 3px solid var(--warn-edge);
+    border-radius: 0 6px 6px 0;
+    padding: 0.65rem 0.9rem;
+    margin: 0.8rem 0;
+    font-size: 0.92rem;
+  }
+  .callout .tag {
+    font-weight: 700;
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--warn-edge);
+    display: block;
+    margin-bottom: 0.15rem;
+  }
+  .note {
+    background: var(--accent-wash);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+    padding: 0.65rem 0.9rem;
+    margin: 0.8rem 0;
+    font-size: 0.92rem;
+  }
+
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; margin: 0.8rem 0; }
+  .table-wrap { overflow-x: auto; }
+  th, td { text-align: left; padding: 0.42rem 0.7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; }
+  td:first-child { font-family: "Cascadia Code", Consolas, ui-monospace, monospace; font-size: 0.82rem; white-space: nowrap; }
+  td { color: var(--ink-2); }
+  td:first-child { color: var(--ink); }
+  td.num { font-variant-numeric: tabular-nums; }
+
+  figure { margin: 1.4rem 0; }
+  figure svg { width: 100%; height: auto; display: block; background: var(--plane); border: 1px solid var(--line); border-radius: 8px; }
+  figcaption { font-size: 0.82rem; color: var(--muted); margin-top: 0.5rem; }
+  .legend { display: flex; flex-wrap: wrap; gap: 1rem; font-size: 0.82rem; color: var(--ink-2); margin-top: 0.5rem; }
+  .legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .swatch { width: 16px; height: 3px; border-radius: 2px; display: inline-block; }
+
+  footer { margin-top: 4rem; border-top: 1px solid var(--line); padding-top: 1rem; color: var(--muted); font-size: 0.8rem; }
+</style>
+
+<main>
+<header class="doc">
+  <span class="eyebrow">mic · training internals</span>
+  <h1>Focal loss: why it exists, and how this pipeline leans on it</h1>
+  <p class="lede">The loss function in <code>losses.py</code> is the only one this
+  project trains with. This document derives it from ordinary cross-entropy,
+  shows quantitatively why it survives extreme class imbalance, and walks
+  through the four places the codebase exploits its structure.</p>
+
+  <nav class="toc" aria-label="Contents">
+    <a href="#problem">1 · The imbalance problem</a>
+    <a href="#derivation">2 · From cross-entropy to focal loss</a>
+    <a href="#gamma">3 · What γ actually does</a>
+    <a href="#alpha">4 · What α actually does</a>
+    <a href="#code">5 · How this code uses it</a>
+    <a href="#practice">6 · Practical guidance</a>
+  </nav>
+</header>
+
+<section id="problem">
+  <span class="eyebrow">Section 1</span>
+  <h2>The imbalance problem, concretely</h2>
+
+  <p>Take a realistic split for this project: 5 genuine classes × 30 samples,
+  plus 25 hard negatives per genuine sample — 150 genuine vs 3,750 hard
+  negatives. Under plain cross-entropy every sample contributes</p>
+  <div class="formula">CE(p_y) = −log(p_y)          p_y = softmax probability of the true class</div>
+  <p>The trouble is not the <em>size</em> of any single loss term — it's the
+  <em>sum</em>. A few epochs in, most hard negatives are already easy: the model
+  assigns them p<sub>y</sub> ≈ 0.9 and each contributes a tiny −log(0.9) ≈ 0.105.
+  But 3,750 samples × 0.105 ≈ <strong>394</strong> total loss, while 150 genuine
+  samples still fighting at p<sub>y</sub> ≈ 0.4 contribute 150 × 0.916 ≈
+  <strong>137</strong>. The gradient is ~3:1 dominated by examples the model has
+  already solved, in exactly the direction that suppresses the minority classes.
+  Scale the imbalance to 100:1 or 1000:1 and the minority signal drowns
+  completely — training converges to "predict hard_negative always", which is a
+  low-loss, useless model.</p>
+
+  <p>Classical fixes each address half the problem:</p>
+  <ul>
+    <li><strong>Class weighting</strong> (α-balanced CE) rescales <em>whole
+    classes</em> — but it cannot distinguish an easy majority sample from a hard
+    one; it dampens both equally.</li>
+    <li><strong>Undersampling</strong> throws majority data away — but the samples
+    you drop might be exactly the difficult ones worth keeping.</li>
+  </ul>
+  <p>Focal loss attacks the actual culprit: it down-weights samples by how
+  <em>easy</em> they currently are, per-sample and continuously re-evaluated on
+  every forward pass.</p>
+</section>
+
+<section id="derivation">
+  <span class="eyebrow">Section 2</span>
+  <h2>From cross-entropy to focal loss</h2>
+
+  <p>Focal loss (Lin et&nbsp;al., <em>Focal Loss for Dense Object Detection</em>,
+  ICCV 2017 — born from the same problem at 1000:1 scale in one-stage object
+  detectors) multiplies cross-entropy by a <em>modulating factor</em> and a
+  per-class weight:</p>
+  <div class="formula">FL(p_y) = −α[y] · (1 − p_y)<sup>γ</sup> · log(p_y)</div>
+  <p>Two independent knobs:</p>
+  <ul>
+    <li><code>(1 − p_y)^γ</code> — the <strong>focusing term</strong>. When the model
+    is already confident and correct (p<sub>y</sub> → 1) the factor collapses to 0,
+    silencing the sample. When the model is wrong (p<sub>y</sub> → 0) the factor is
+    ≈ 1 and the sample keeps its full cross-entropy voice. γ controls how sharp
+    that transition is; γ = 0 recovers plain CE exactly.</li>
+    <li><code>α[y]</code> — the <strong>class weight</strong>, an ordinary prior that
+    scales entire classes independently of difficulty.</li>
+  </ul>
+
+  <figure>
+    <svg id="loss-curves" viewBox="0 0 640 360" role="img" aria-label="Loss versus true-class probability for gamma 0, 1, 2, 5"></svg>
+    <div class="legend">
+      <span><span class="swatch" style="background:var(--s1)"></span>γ = 0 (cross-entropy)</span>
+      <span><span class="swatch" style="background:var(--s2)"></span>γ = 1</span>
+      <span><span class="swatch" style="background:var(--s3)"></span>γ = 2 (default)</span>
+      <span><span class="swatch" style="background:var(--s4)"></span>γ = 5</span>
+    </div>
+    <figcaption>Loss vs true-class probability p<sub>y</sub> (α = 1). All curves
+    agree where the model is badly wrong (left); they separate where the model is
+    already right (right) — that region is where the majority class lives, and
+    focal loss is the curve that refuses to keep spending gradient there.</figcaption>
+  </figure>
+
+  <p>Revisiting the Section-1 arithmetic with γ = 2: the easy hard negatives at
+  p<sub>y</sub> = 0.9 are modulated by (0.1)² = 0.01, so their total contribution
+  falls from 394 to <strong>≈ 3.9</strong>. The struggling genuine samples at
+  p<sub>y</sub> = 0.4 are modulated by (0.6)² = 0.36, contributing ≈ 49. The
+  gradient balance flips from 3:1 majority-dominated to ~13:1
+  <em>minority</em>-dominated — without discarding a single sample or touching a
+  class prior. And the weighting is <em>adaptive</em>: if a hard negative starts
+  fooling the model again next epoch, its p<sub>y</sub> drops and its voice returns
+  automatically.</p>
+</section>
+
+<section id="gamma">
+  <span class="eyebrow">Section 3</span>
+  <h2>What γ actually does — the down-weighting table</h2>
+
+  <p>The focusing factor for a sample at confidence p<sub>y</sub> (loss reduction
+  relative to cross-entropy):</p>
+  <div class="table-wrap"><table>
+    <tr><th>p_y (true class)</th><th>γ = 1</th><th>γ = 2</th><th>γ = 5</th><th>reading</th></tr>
+    <tr><td>0.1</td><td class="num">0.90×</td><td class="num">0.81×</td><td class="num">0.59×</td><td>badly wrong — keeps nearly full loss at any γ</td></tr>
+    <tr><td>0.5</td><td class="num">0.50×</td><td class="num">0.25×</td><td class="num">0.03×</td><td>borderline — γ=2 quarters it, γ=5 nearly silences it</td></tr>
+    <tr><td>0.9</td><td class="num">0.10×</td><td class="num">0.01×</td><td class="num">10⁻⁵×</td><td>easy — γ=2 gives a 100× reduction</td></tr>
+    <tr><td>0.99</td><td class="num">0.01×</td><td class="num">10⁻⁴×</td><td class="num">10⁻¹⁰×</td><td>trivial — effectively removed from training</td></tr>
+  </table></div>
+
+  <p>So γ sets <em>how easy a sample must be before it stops mattering</em>.
+  γ&nbsp;=&nbsp;2 is the standard default and what <code>--focal-gamma</code>
+  ships with: easy samples fade by two orders of magnitude while genuinely
+  contested samples (p ≈ 0.5) keep a quarter of their voice. Higher γ focuses
+  harder but has a failure mode: at initialization <em>everything</em> is
+  misclassified, so early training rides on a small set of extreme samples and
+  can destabilize — one reason the pipeline pairs the loss with sampling caps
+  rather than cranking γ.</p>
+</section>
+
+<section id="alpha">
+  <span class="eyebrow">Section 4</span>
+  <h2>What α actually does — and why only one class gets a special value</h2>
+
+  <p>γ handles the easy/hard axis; α handles the <em>asymmetric cost</em> axis.
+  This project's objective is explicitly asymmetric: missing a genuine snippet
+  (recall failure) is expensive; letting a hard negative through is the thing we
+  fix <em>second</em>, only after recall is secured. <code>losses.py</code>
+  therefore builds the α vector as:</p>
+  <div class="formula">alpha = [1, 1, …, 1, hn_alpha]     # genuine classes 1.0, hard_negative from --hn-alpha</div>
+  <p>With the default <code>--hn-alpha 0.25</code>, an error on a hard negative
+  costs a quarter of an equally-confident error on a genuine sample. The model is
+  told, in the loss itself: <em>prefer false accepts over false rejects</em>. That
+  bias shows up exactly where the pipeline wants it — the genuineness score
+  distribution shifts so that high recall is reachable at a higher threshold,
+  which is what the post-hoc threshold sweep then exploits.</p>
+
+  <p>α and γ compose rather than compete: γ decides <em>which samples within every
+  class</em> deserve gradient; α decides <em>how much each class's mistakes cost</em>.
+  The original paper found the two interact (its best pairing was γ=2, α=0.25 for
+  the rare class — note their α weighted the <em>rare</em> class low because the
+  focusing term already favored it; here the α semantics serve the recall-first
+  objective instead, weighting the <em>majority</em> hard-negative class down).</p>
+</section>
+
+<section id="code">
+  <span class="eyebrow">Section 5</span>
+  <h2>How this code takes advantage of the loss</h2>
+
+  <h3>5.1 The implementation itself</h3>
+  <pre><code>log_p   = F.log_softmax(logits, dim=1)          # numerically stable: never log(softmax(x))
+log_p_y = log_p.gather(1, targets.unsqueeze(1)).squeeze(1)
+p_y     = log_p_y.exp()
+loss    = -self.alpha[targets] * (1 - p_y).pow(self.gamma) * log_p_y</code></pre>
+  <p>Three deliberate choices: <code>log_softmax</code> (a fused, stable kernel —
+  computing <code>log(softmax(x))</code> separately overflows for large logits);
+  the α vector registered as a buffer so it moves to the GPU with the module and
+  survives checkpointing; and <strong>no reduction</strong> — the forward returns
+  one loss per sample, and the training loop takes <code>.mean()</code> itself.
+  That last choice is not cosmetic; it is what enables 5.2.</p>
+
+  <h3>5.2 Per-sample losses feed the hard-negative miner</h3>
+  <p>Focal loss produces, for free, a continuously-updated <em>difficulty
+  signal</em>: a hard negative's per-sample loss is high precisely when the model
+  currently confuses it with a genuine class. The training loop hands the
+  unreduced loss vector to the miner every batch:</p>
+  <pre><code>per_sample = criterion(logits, labs)     # (B,) — no reduction
+loss = per_sample.mean(); …backward…
+miner.update(idxs, per_sample)           # EMA: score ← 0.7·score + 0.3·loss</code></pre>
+  <p>When <code>--imbalance-ratio</code> forces subsampling, the sampler draws the
+  next epoch's hard negatives in proportion to these scores. The loss and the
+  sampler form a loop: focal loss <em>measures</em> which hard negatives are
+  dangerous → the miner <em>schedules</em> them → the loss focuses on them when
+  they arrive. The same quantity drives both attention mechanisms, at two
+  timescales — γ within a batch, mining across epochs.</p>
+
+  <h3>5.3 α is a live training knob, not a constant</h3>
+  <p>Because α is just a buffer, <code>set_hn_alpha()</code> can change it between
+  epochs at zero cost. The pressure ramp uses this: with
+  <code>--hn-alpha 0.1 --hn-alpha-end 1.0 --ramp-epochs N</code>, the
+  hard-negative class's cost rises step by step, and each step is <em>gated on
+  the recall target being met</em> — the loss gets stricter about specificity
+  only as fast as recall can bear. The α schedule and the imbalance-ratio
+  schedule move together, so cost and exposure rise in lockstep.</p>
+
+  <h3>5.4 Division of labor with the threshold sweep</h3>
+  <p>Nothing in the loss guarantees the recall target — and that's intentional.
+  The loss's job is to shape the <em>score distribution</em>: push genuine samples'
+  genuineness scores up and hard negatives' down, so the two populations
+  separate. The post-hoc validation sweep then <em>guarantees</em> the target by
+  choosing the operating threshold. Focal loss makes the achievable
+  specificity-at-target-recall higher; the sweep banks it. Loss = optimization
+  pressure, threshold = contractual guarantee.</p>
+
+  <div class="note">One measurable side effect: heavily down-weighting easy
+  samples means the model gets little gradient pressure to push confidences
+  toward 0 or 1, so scores tend to be less overconfident than plain CE — but not
+  calibrated either. That is why <code>evaluate.py</code> ships a calibration
+  curve and ECE: the threshold is always <em>swept</em>, never assumed to sit at a
+  probability-meaningful value like 0.5.</div>
+</section>
+
+<section id="practice">
+  <span class="eyebrow">Section 6</span>
+  <h2>Practical guidance</h2>
+  <ul>
+    <li><strong>Start with the defaults</strong> (γ=2, hn-α=0.25). They are the
+    well-tested regime; the imbalance ratio and ramp give you enough control
+    without touching the loss shape.</li>
+    <li><strong>Minority recall stuck low?</strong> Lower <code>--hn-alpha</code>
+    (0.1) and/or tighten <code>--imbalance-ratio</code> toward 1.0 before raising γ
+    — exposure and cost fixes are gentler than curvature fixes.</li>
+    <li><strong>Specificity plateaued below what you need?</strong> Ramp α up
+    (<code>--hn-alpha-end 1.0</code>, or beyond 1 in stubborn cases) with
+    <code>--ramp-epochs</code>, rather than jumping it — the gate protects recall
+    while the pressure rises.</li>
+    <li><strong>Loss ≈ 0 but validation flat?</strong> With focal loss a near-zero
+    training loss is normal once most samples are easy; judge progress by the
+    validation columns in <code>metrics.csv</code> (recall, specificity, AUROC),
+    never by the raw loss magnitude.</li>
+    <li><strong>Raising γ above 2</strong> is a last resort for extreme imbalance
+    that mining + ratio caps can't tame; expect noisier early epochs and consider
+    a lower learning rate to compensate.</li>
+  </ul>
+
+  <div class="callout"><span class="tag">Summary</span>
+  Cross-entropy spends gradient in proportion to how many samples say something;
+  focal loss spends it in proportion to how much each sample still has to teach.
+  In this pipeline that principle is used three times over: inside the batch
+  (γ), across classes (α, ramped), and across epochs (per-sample losses driving
+  the hard-negative miner) — with the threshold sweep converting the resulting
+  score separation into a guaranteed operating point.</div>
+</section>
+
+<footer>
+  mic training internals · focal loss reference — see also the CLI reference
+  (docs/cli-reference.html) for the flags mentioned here: --focal-gamma,
+  --hn-alpha, --hn-alpha-end, --ramp-epochs, --imbalance-ratio,
+  --mining-random-frac.
+</footer>
+</main>
+
+<script>
+(function () {
+  // Loss curves: FL(p) = -(1-p)^g * log(p), for g in {0,1,2,5}.
+  var svg = document.getElementById("loss-curves");
+  var W = 640, H = 360, padL = 52, padR = 16, padT = 14, padB = 40;
+  var pw = W - padL - padR, ph = H - padT - padB;
+  var yMax = 4.0; // clip; -log(p) explodes near 0
+  var gammas = [
+    { g: 0, v: "--s1" }, { g: 1, v: "--s2" }, { g: 2, v: "--s3" }, { g: 5, v: "--s4" },
+  ];
+  var ns = "http://www.w3.org/2000/svg";
+
+  function X(p) { return padL + p * pw; }
+  function Y(l) { return padT + (1 - Math.min(l, yMax) / yMax) * ph; }
+  function el(name, attrs) {
+    var e = document.createElementNS(ns, name);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    svg.appendChild(e);
+    return e;
+  }
+
+  // grid + axes (recessive)
+  for (var ly = 0; ly <= yMax; ly++) {
+    el("line", { x1: padL, x2: W - padR, y1: Y(ly), y2: Y(ly),
+                 stroke: "var(--line)", "stroke-width": 1 });
+    var t = el("text", { x: padL - 8, y: Y(ly) + 4, "text-anchor": "end",
+                         "font-size": 11, fill: "var(--muted)" });
+    t.textContent = ly.toFixed(0);
+  }
+  for (var px = 0; px <= 10; px += 2) {
+    var p = px / 10;
+    el("line", { x1: X(p), x2: X(p), y1: padT, y2: H - padB,
+                 stroke: "var(--line)", "stroke-width": 1 });
+    var tx = el("text", { x: X(p), y: H - padB + 16, "text-anchor": "middle",
+                          "font-size": 11, fill: "var(--muted)" });
+    tx.textContent = p.toFixed(1);
+  }
+  var xl = el("text", { x: padL + pw / 2, y: H - 6, "text-anchor": "middle",
+                        "font-size": 12, fill: "var(--ink-2)" });
+  xl.textContent = "true-class probability p";
+  var yl = el("text", { x: 14, y: padT + ph / 2, "font-size": 12,
+                        fill: "var(--ink-2)",
+                        transform: "rotate(-90 14 " + (padT + ph / 2) + ")",
+                        "text-anchor": "middle" });
+  yl.textContent = "loss";
+
+  gammas.forEach(function (s) {
+    var pts = [];
+    for (var i = 0; i <= 300; i++) {
+      var p = 0.005 + (0.995 - 0.005) * (i / 300);
+      var loss = -Math.pow(1 - p, s.g) * Math.log(p);
+      pts.push(X(p).toFixed(1) + "," + Y(loss).toFixed(1));
+    }
+    el("polyline", { points: pts.join(" "), fill: "none",
+                     stroke: "var(" + s.v + ")", "stroke-width": 2,
+                     "stroke-linejoin": "round" });
+  });
+})();
+</script>
+
+</body>
+</html>
