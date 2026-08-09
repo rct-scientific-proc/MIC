@@ -62,7 +62,8 @@ def main() -> None:
 
     run(REPO / "evaluate.py", out / "best.pt", h5, "--out-dir", out / "eval")
     for name in ("report.txt", "confusion.csv", "confusion.png",
-                 "roc_genuine_vs_hn.png", "roc_per_class.png", "history.png"):
+                 "roc_genuine_vs_hn.png", "roc_per_class.png",
+                 "calibration.png", "history.png"):
         assert (out / "eval" / name).exists(), f"missing eval output {name}"
 
     report = (out / "eval" / "report.txt").read_text(encoding="utf-8")

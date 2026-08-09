@@ -179,6 +179,55 @@ def plot_history(csv_path, path) -> None:
     _save(fig, path)
 
 
+def plot_calibration(cal: dict, path, threshold: float | None = None) -> None:
+    """Reliability diagram for the genuineness score.
+
+    Top panel: observed genuine fraction vs mean predicted score per bin,
+    against the perfect-calibration diagonal. Bottom panel: per-bin sample
+    counts on their own axis (never a twin axis) — with heavy imbalance the
+    tail bins dominate, so counts use a log scale when they span decades.
+    """
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(5.6, 6.4), facecolor=SURFACE, sharex=True,
+        height_ratios=[2.6, 1], constrained_layout=True,
+    )
+    _style_axes(ax1)
+    _style_axes(ax2)
+
+    ax1.plot([0, 1], [0, 1], color=MUTED, linewidth=1, linestyle=(0, (4, 4)))
+    # Connect only adjacent occupied bins — a line across empty bins would
+    # imply observations that don't exist. Isolated bins render as markers.
+    breaks = np.flatnonzero(np.diff(cal["bins"]) > 1) + 1
+    for seg in np.split(np.arange(len(cal["bins"])), breaks):
+        ax1.plot(cal["mean_pred"][seg], cal["frac_genuine"][seg],
+                 color=SERIES[0], linewidth=2, marker="o", markersize=6,
+                 markeredgecolor=SURFACE, markeredgewidth=1.5)
+    if threshold is not None:
+        ax1.axvline(threshold, color=SERIES[1], linewidth=1.2,
+                    linestyle=(0, (2, 3)))
+        ha = "right" if threshold > 0.5 else "left"
+        pad = -0.01 if ha == "right" else 0.01
+        ax1.text(threshold + pad, 0.97, f"thr {threshold:.3f}", fontsize=8,
+                 color=SERIES[1], ha=ha, va="top")
+    ax1.text(0.98, 0.04, f"ECE {cal['ece']:.4f}", transform=ax1.transAxes,
+             ha="right", fontsize=9, color=INK_2)
+    ax1.set_xlim(-0.02, 1.02)
+    ax1.set_ylim(-0.02, 1.02)
+    ax1.set_ylabel("observed genuine fraction")
+    ax1.set_title("Calibration of the genuineness score")
+
+    width = 0.9 / cal["n_bins"]
+    ax2.bar(cal["mean_pred"], cal["counts"], width=width, color=SERIES[0],
+            edgecolor=SURFACE, linewidth=0.5)
+    counts = cal["counts"]
+    if counts.max() > 50 * max(counts.min(), 1):
+        ax2.set_yscale("log")
+    ax2.set_ylabel("samples")
+    ax2.set_xlabel("predicted genuineness score s (bin mean)")
+
+    _save(fig, path)
+
+
 def plot_confusion(cm: np.ndarray, class_names: list[str], path) -> None:
     """Row-normalized confusion heatmap (rows = true class), single-hue
     sequential ramp, annotated with counts when the grid is small enough."""

@@ -618,9 +618,19 @@ class of an accepted sample = argmax over the non-HN classes</div>
     <div class="arg-head"><span class="flag">--out-dir</span><span class="badge">path</span><span class="badge">default: &lt;ckpt dir&gt;/eval_&lt;split&gt;</span></div>
     <p>Destination for <code>report.txt</code>, <code>confusion.csv</code> /
     <code>confusion.png</code>, <code>roc_genuine_vs_hn.png</code> (operating point
-    marked), <code>roc_per_class.png</code>, and <code>history.png</code>. With more
-    than 8 genuine classes the per-class ROC keeps the worst-AUC classes and the
-    report lists which were omitted — nothing is dropped silently.</p>
+    marked), <code>roc_per_class.png</code>, <code>calibration.png</code>, and
+    <code>history.png</code>. With more than 8 genuine classes the per-class ROC
+    keeps the worst-AUC classes and the report lists which were omitted — nothing
+    is dropped silently.</p>
+    <p><code>calibration.png</code> is a reliability diagram of the genuineness
+    score: samples are binned by predicted <code>s</code>, and each bin's observed
+    genuine fraction is plotted against its mean prediction — the diagonal is
+    perfect calibration, with the stored threshold marked and per-bin counts
+    below. The report adds the expected calibration error (ECE), the
+    count-weighted mean |observed − predicted|. A well-calibrated score makes the
+    threshold interpretable as a probability; an overconfident one still ranks
+    correctly (fine for ROC/threshold purposes) but its value shouldn't be read
+    as P(genuine).</p>
   </div>
 
   <div class="arg" id="e-history">

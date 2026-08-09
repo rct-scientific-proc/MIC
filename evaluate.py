@@ -10,6 +10,7 @@ Outputs in --out-dir (default: <checkpoint dir>/eval_<split>):
     confusion.png              row-normalized heatmap
     roc_genuine_vs_hn.png      binary ROC with the operating point marked
     roc_per_class.png          one-vs-rest ROCs
+    calibration.png            reliability diagram of the genuineness score
     history.png                metric-vs-epoch curves (when metrics.csv is
                                found next to the checkpoint, or --history-csv)
 
@@ -27,11 +28,11 @@ import torch
 from torch.utils.data import DataLoader
 
 from dataset import SPLIT_NAMES, SPLIT_TEST, H5SnippetDataset, validate_h5
-from metrics import (apply_threshold, collect_probs, final_prediction,
-                     genuine_vs_hn_roc, per_class_ovr_roc)
+from metrics import (apply_threshold, calibration_bins, collect_probs,
+                     final_prediction, genuine_vs_hn_roc, per_class_ovr_roc)
 from model import build_model
-from plots import (plot_confusion, plot_genuine_vs_hn_roc, plot_history,
-                   plot_per_class_rocs)
+from plots import (plot_calibration, plot_confusion, plot_genuine_vs_hn_roc,
+                   plot_history, plot_per_class_rocs)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -106,6 +107,10 @@ def main(argv=None) -> None:
         )
     except ValueError as e:
         lines.append(f"genuine-vs-HN ROC skipped: {e}")
+
+    cal = calibration_bins(probs, labels, hn_index)
+    lines.append(f"ECE (genuineness score, {cal['n_bins']} bins) : {cal['ece']:.4f}")
+    plot_calibration(cal, out_dir / "calibration.png", threshold=threshold)
 
     rocs = {}
     for c in range(len(classes)):

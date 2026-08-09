@@ -142,6 +142,44 @@ def final_prediction(probs: np.ndarray, hn_index: int, threshold: float) -> np.n
     return pred
 
 
+def calibration_bins(
+    probs: np.ndarray, labels: np.ndarray, hn_index: int, n_bins: int = 10
+) -> dict:
+    """Reliability data for the genuineness score s = P(not hard_negative).
+
+    Equal-width bins over [0, 1]; empty bins are dropped. Returns per-bin
+    mean predicted score, observed genuine fraction, and counts, plus the
+    expected calibration error (ECE): the count-weighted mean |observed -
+    predicted|. A perfectly calibrated score has observed == predicted in
+    every bin and ECE 0.
+    """
+    scores = genuineness_scores(probs, hn_index)
+    genuine = labels != hn_index
+
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    bin_idx = np.clip(np.digitize(scores, edges[1:-1]), 0, n_bins - 1)
+
+    mean_pred, frac_genuine, counts, bins = [], [], [], []
+    for b in range(n_bins):
+        mask = bin_idx == b
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        mean_pred.append(float(scores[mask].mean()))
+        frac_genuine.append(float(genuine[mask].mean()))
+        counts.append(n)
+        bins.append(b)
+
+    mean_pred = np.array(mean_pred)
+    frac_genuine = np.array(frac_genuine)
+    counts = np.array(counts)
+    ece = float(np.sum(counts / counts.sum() * np.abs(frac_genuine - mean_pred)))
+
+    return {"mean_pred": mean_pred, "frac_genuine": frac_genuine,
+            "counts": counts, "bins": np.array(bins), "ece": ece,
+            "n_bins": n_bins}
+
+
 def genuine_vs_hn_roc(
     probs: np.ndarray, labels: np.ndarray, hn_index: int
 ) -> tuple[np.ndarray, np.ndarray, float]:
