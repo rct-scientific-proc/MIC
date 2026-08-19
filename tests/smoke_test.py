@@ -51,7 +51,7 @@ def main() -> None:
     ]
     # short first leg with multiprocess loading (the Windows-sensitive path)
     run(*common, "--epochs", "3", "--workers", "2")
-    for name in ("last.pt", "best.pt", "metrics.csv"):
+    for name in ("last.pt", "best.pt", "metrics.csv", "class_thresholds.csv"):
         assert (out / name).exists(), f"missing {out / name}"
 
     # resume and train long enough for BN stats to settle and the model to
@@ -68,6 +68,22 @@ def main() -> None:
 
     report = (out / "eval" / "report.txt").read_text(encoding="utf-8")
     print("\n--- report.txt ---\n" + report)
+
+    # short per-class-threshold leg with a floor, warm-started from the
+    # trained weights (resume restores the epoch counter, so extend past it)
+    out_pc = OUT_ROOT / "run_per_class"
+    run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+        "--batch-size", "32", "--target-recall", "0.98",
+        "--threshold-mode", "per-class", "--per-class-min-count", "5",
+        "--min-threshold", "0.05", "--out-dir", out_pc, "--patience", "0",
+        "--seed", "1", "--epochs", "43", "--workers", "0",
+        "--resume", out / "last.pt")
+    assert (out_pc / "class_thresholds.csv").exists()
+
+    run(REPO / "evaluate.py", out_pc / "best.pt", h5, "--out-dir", out_pc / "eval")
+    pc_report = (out_pc / "eval" / "report.txt").read_text(encoding="utf-8")
+    assert "per-class" in pc_report, "per-class mode not reflected in report"
+    print("\n--- per-class report.txt ---\n" + pc_report)
 
     print(f"\noutputs kept in {OUT_ROOT}")
     print("SMOKE TEST PASSED")

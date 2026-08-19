@@ -20,10 +20,20 @@ split are combined by a configurable aggregate:
 Hard-negative specificity is the fraction of hard negatives rejected
 (s < threshold).
 
-sweep_threshold picks the LARGEST threshold whose macro recall still meets the
-target — recall is monotone non-increasing in the threshold, so this is the
-operating point with maximum specificity subject to the recall constraint.
-The chosen threshold is a first-class output: it is stored in checkpoints and
+sweep_threshold picks the LARGEST threshold whose aggregated recall still
+meets the target — recall is monotone non-increasing in the threshold, so
+this is the operating point with maximum specificity subject to the recall
+constraint. A configurable floor (min_threshold) is never crossed: if the
+target is only reachable below it, the sweep operates exactly at the floor
+and reports target_met=False.
+
+sweep_class_thresholds generalizes this to one threshold per genuine class:
+samples are partitioned by predicted class, and each partition is swept
+independently (class-c recall depends only on true-c samples predicted c, so
+the per-partition sweeps decompose exactly). Classes with too few predicted
+validation samples fall back to the global threshold.
+
+The chosen threshold(s) are first-class outputs: stored in checkpoints and
 required at inference/evaluation time.
 """
 
@@ -86,29 +96,65 @@ def non_hn_argmax(probs: np.ndarray, hn_index: int) -> np.ndarray:
     return non_hn[np.argmax(probs[:, non_hn], axis=1)]
 
 
+def _per_sample_thresholds(threshold, pred: np.ndarray, num_classes: int):
+    """Resolve a scalar or {class: t} threshold to one value per sample
+    (per-class thresholds apply the PREDICTED class's threshold)."""
+    if isinstance(threshold, dict):
+        vec = np.zeros(num_classes)
+        for c, t in threshold.items():
+            vec[c] = t
+        return vec[pred]
+    return float(threshold)
+
+
+def _choose_cut(s_sorted: np.ndarray, curve: np.ndarray, target: float,
+                floor: float) -> tuple[int, bool]:
+    """Pick an operating cut on descending-sorted scores.
+
+    Valid cuts are the last index of each distinct score value (accepting
+    s >= t always takes whole tie groups), restricted to thresholds >= floor.
+    Returns (k, True) for the highest-threshold cut whose curve value meets
+    the target, else (k_floor, False) where k_floor accepts exactly the
+    samples with s >= floor (k_floor == -1 means accept nothing).
+    """
+    n = len(s_sorted)
+    cuts = np.append(np.flatnonzero(np.diff(s_sorted) != 0), n - 1)
+    eligible = cuts[s_sorted[cuts] >= floor]
+    if eligible.size:
+        meets = curve[eligible] >= target
+        if meets.any():
+            return int(eligible[int(np.argmax(meets))]), True
+    return int((s_sorted >= floor).sum()) - 1, False
+
+
 def sweep_threshold(
     probs: np.ndarray,
     labels: np.ndarray,
     hn_index: int,
     target_recall: float,
     agg: str = "macro",
+    min_threshold: float = 0.0,
 ) -> dict:
-    """Choose the operating threshold on (typically validation) data.
+    """Choose the global operating threshold on (typically validation) data.
 
     Every per-class recall is monotone non-decreasing as the threshold falls,
     so each aggregate (macro/harmonic/min) is too — the first cut meeting the
-    target is still the maximum-specificity operating point.
+    target is still the maximum-specificity operating point. The threshold
+    never goes below min_threshold: if the target is only reachable beneath
+    the floor, the operating point IS the floor and target_met is False.
 
     Returns a dict with:
       threshold        chosen operating point (accept if s >= threshold)
-      target_met       whether the target aggregated recall is achievable
+      target_met       whether the target was met at a threshold >= the floor
       recall           aggregated recall over genuine classes at the threshold
       recall_agg       the aggregate used ('macro' | 'harmonic' | 'min')
       per_class_recall {class_index: recall} at the threshold
       specificity      fraction of hard negatives rejected (nan if none present)
-      max_recall       aggregated recall with everything accepted (threshold ~ 0)
+      max_recall       aggregated recall with everything accepted (threshold ~ 0),
+                       the model's ceiling ignoring the floor
+      predicted_counts {class_index: samples argmax-assigned to the class}
+      min_threshold    the floor in effect
     """
-    n = len(labels)
     scores = genuineness_scores(probs, hn_index)
     pred = non_hn_argmax(probs, hn_index)
     genuine = labels != hn_index
@@ -132,40 +178,113 @@ def sweep_threshold(
     n_hn = int((~genuine).sum())
     cum_hn_accepted = np.cumsum(~genuine[order])
 
-    # Valid cut points: last index of each distinct score value (accepting
-    # s >= t always takes whole tie groups).
-    cuts = np.append(np.flatnonzero(np.diff(s_sorted) != 0), n - 1)
+    k, target_met = _choose_cut(s_sorted, agg_curve, target_recall, min_threshold)
+    threshold = float(s_sorted[k]) if target_met else float(min_threshold)
 
-    meets = agg_curve[cuts] >= target_recall
-    if meets.any():
-        k = cuts[int(np.argmax(meets))]  # first (highest-threshold) cut meeting target
-        threshold = float(s_sorted[k])
-        target_met = True
-    else:
-        k = cuts[-1]  # accept everything; best we can do
-        threshold = 0.0
-        target_met = False
+    if k >= 0:
+        recall = float(agg_curve[k])
+        per_class = {c: float(cum_recall[c][k]) for c in class_ids}
+        spec = float(1.0 - cum_hn_accepted[k] / n_hn) if n_hn else float("nan")
+    else:  # floor above every score: nothing accepted
+        recall = 0.0
+        per_class = {c: 0.0 for c in class_ids}
+        spec = 1.0 if n_hn else float("nan")
 
     return {
         "threshold": threshold,
         "target_met": target_met,
-        "recall": float(agg_curve[k]),
+        "recall": recall,
         "recall_agg": agg,
-        "per_class_recall": {c: float(cum_recall[c][k]) for c in class_ids},
-        "specificity": float(1.0 - cum_hn_accepted[k] / n_hn) if n_hn else float("nan"),
+        "per_class_recall": per_class,
+        "specificity": spec,
         "max_recall": float(agg_curve[-1]),
+        "predicted_counts": {int(c): int((pred == c).sum()) for c in
+                             range(probs.shape[1]) if c != hn_index},
+        "min_threshold": float(min_threshold),
+    }
+
+
+def sweep_class_thresholds(
+    probs: np.ndarray,
+    labels: np.ndarray,
+    hn_index: int,
+    target_recall: float,
+    agg: str = "macro",
+    min_threshold: float = 0.0,
+    min_count: int = 20,
+) -> dict:
+    """Choose one operating threshold per genuine class.
+
+    A sample's threshold is that of its PREDICTED class, so the sweep
+    decomposes: class-c recall depends only on true-c samples predicted c,
+    and each predicted-class partition is swept independently for the
+    highest threshold >= min_threshold meeting the recall target. Classes
+    with fewer than min_count predicted validation samples — or with no
+    genuine validation samples at all — fall back to the global threshold
+    (which is always computed, and also serves as the scalar 'threshold'
+    field for logging).
+
+    target_met requires EVERY class with genuine validation samples to meet
+    the target (per-class mode implicitly gates like --recall-agg min; the
+    agg still shapes the single reported recall number).
+    """
+    global_op = sweep_threshold(probs, labels, hn_index, target_recall, agg,
+                                min_threshold)
+    scores = genuineness_scores(probs, hn_index)
+    pred = non_hn_argmax(probs, hn_index)
+
+    thresholds: dict[int, float] = {}
+    met: dict[int, bool] = {}
+    fallback: dict[int, bool] = {}
+    for c in range(probs.shape[1]):
+        if c == hn_index:
+            continue
+        part = np.flatnonzero(pred == c)
+        n_true = int((labels == c).sum())
+        if n_true == 0 or len(part) < min_count:
+            thresholds[c] = global_op["threshold"]
+            fallback[c] = True
+            continue
+        fallback[c] = False
+        order = np.argsort(-scores[part], kind="stable")
+        s_sorted = scores[part][order]
+        curve = np.cumsum(labels[part][order] == c) / n_true
+        k, ok = _choose_cut(s_sorted, curve, target_recall, min_threshold)
+        thresholds[c] = float(s_sorted[k]) if ok else float(min_threshold)
+        met[c] = ok
+
+    res = apply_threshold(probs, labels, hn_index, thresholds, agg=agg)
+    for c, r in res["per_class_recall"].items():
+        if fallback.get(c):  # judged at the fallback threshold it actually uses
+            met[c] = r >= target_recall
+
+    return {
+        "threshold": global_op["threshold"],  # global fallback, for logging
+        "class_thresholds": thresholds,
+        "target_met": all(met.get(c, False) for c in res["per_class_recall"]),
+        "recall": res["recall"],
+        "recall_agg": agg,
+        "per_class_recall": res["per_class_recall"],
+        "specificity": res["specificity"],
+        "tpr": res["tpr"],
+        "max_recall": global_op["max_recall"],
+        "predicted_counts": global_op["predicted_counts"],
+        "fallback_classes": sorted(c for c, f in fallback.items() if f),
+        "min_threshold": float(min_threshold),
     }
 
 
 def apply_threshold(
-    probs: np.ndarray, labels: np.ndarray, hn_index: int, threshold: float,
-    agg: str = "macro",
+    probs: np.ndarray, labels: np.ndarray, hn_index: int,
+    threshold: "float | dict[int, float]", agg: str = "macro",
 ) -> dict:
-    """Evaluate a FIXED threshold (e.g. the stored one, on the test split)."""
+    """Evaluate a FIXED operating point (e.g. the stored one, on the test
+    split). `threshold` is either the global scalar or a {class: t} dict of
+    per-class thresholds, applied by predicted class."""
     scores = genuineness_scores(probs, hn_index)
     pred = non_hn_argmax(probs, hn_index)
     genuine = labels != hn_index
-    accepted = scores >= threshold
+    accepted = scores >= _per_sample_thresholds(threshold, pred, probs.shape[1])
     correct = accepted & (pred == labels) & genuine
 
     class_ids = [int(c) for c in np.unique(labels[genuine])]
@@ -174,8 +293,10 @@ def apply_threshold(
     n_hn = int((~genuine).sum())
     recall = (float(aggregate_recall(np.array(list(per_class.values())), agg))
               if per_class else float("nan"))
+    per_class_mode = isinstance(threshold, dict)
     return {
-        "threshold": float(threshold),
+        "threshold": None if per_class_mode else float(threshold),
+        "class_thresholds": dict(threshold) if per_class_mode else None,
         "recall": recall,
         "recall_agg": agg,
         "per_class_recall": per_class,
@@ -184,12 +305,15 @@ def apply_threshold(
     }
 
 
-def final_prediction(probs: np.ndarray, hn_index: int, threshold: float) -> np.ndarray:
+def final_prediction(probs: np.ndarray, hn_index: int,
+                     threshold: "float | dict[int, float]") -> np.ndarray:
     """Full decision rule -> class indices (hn_index for rejected samples)."""
     pred = non_hn_argmax(probs, hn_index)
-    rejected = genuineness_scores(probs, hn_index) < threshold
-    pred[rejected] = hn_index
-    return pred
+    scores = genuineness_scores(probs, hn_index)
+    rejected = scores < _per_sample_thresholds(threshold, pred, probs.shape[1])
+    out = pred.copy()
+    out[rejected] = hn_index
+    return out
 
 
 def calibration_bins(

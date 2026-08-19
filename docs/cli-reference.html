@@ -236,11 +236,19 @@
 accept as genuine  ⇔  s ≥ threshold
 class of an accepted sample = argmax over the non-HN classes</div>
   <p>The threshold is <em>not</em> trained. After every epoch, the validation split is
-  swept and the <em>largest</em> threshold whose macro recall still meets
+  swept and the <em>largest</em> threshold whose aggregated recall still meets
   <code>--target-recall</code> is chosen — recall is monotone in the threshold, so
   the largest passing value is the one with maximum hard-negative specificity.
   That number is saved inside every checkpoint and reused verbatim by
   <code>evaluate.py</code>. A checkpoint without its threshold is half a model.</p>
+  <p>Two refinements on the basic sweep: <code>--min-threshold</code> sets a
+  <strong>floor</strong> the operating point never crosses (if the target is only
+  reachable beneath it, the epoch operates at the floor with
+  <code>target_met=0</code>); and <code>--threshold-mode per-class</code> gives each
+  genuine class its <strong>own</strong> threshold, applied by predicted class —
+  easy classes keep high, specific thresholds while hard classes get exactly the
+  slack they need, instead of one global threshold being dragged down to the
+  weakest class's operating point.</p>
 
   <p><strong>Aggregated recall (genuine classes).</strong> A genuine sample counts
   as recalled only if it is accepted (<code>s ≥ t</code>) <em>and</em> classified as
@@ -484,6 +492,56 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     training and evaluation always report the same statistic.</p>
   </div>
 
+  <div class="arg" id="t-min-threshold">
+    <div class="arg-head"><span class="flag">--min-threshold</span><span class="badge">float 0–1</span><span class="badge">default: 0.0</span></div>
+    <p>A hard floor no operating threshold may go below — a standing guarantee
+    that any sample scoring under the floor is rejected, regardless of recall
+    pressure. If the recall target is achievable at some threshold ≥ the floor,
+    nothing changes. If it is only achievable <em>beneath</em> the floor, the epoch
+    operates exactly <em>at</em> the floor (previously the failure fallback was
+    threshold 0, i.e. accept everything) and records <code>target_met = 0</code>
+    with the recall actually achieved there. In per-class mode the floor applies
+    to every per-class threshold.</p>
+    <div class="callout"><span class="tag">Interaction</span>
+    The floor makes <code>target_met</code> stricter, and <code>target_met</code>
+    gates both the pressure ramp and best-checkpoint ranking — a floor set too
+    high can hold the ramp at step 0 indefinitely and mark every epoch as
+    below-target. Set it from domain knowledge ("scores under 0.1 are junk"),
+    not as a tuning knob.</div>
+  </div>
+
+  <div class="arg" id="t-threshold-mode">
+    <div class="arg-head"><span class="flag">--threshold-mode</span><span class="badge">global | per-class</span><span class="badge">default: global</span></div>
+    <p><code>global</code>: one threshold for every sample (the original behavior).
+    <code>per-class</code>: each genuine class gets its own threshold, and a sample
+    is judged by the threshold of its <em>predicted</em> class. This decomposes
+    cleanly — class-c recall depends only on true-c samples predicted c — so each
+    predicted-class partition is swept independently to its own
+    maximum-specificity threshold at the recall target.</p>
+    <p>Why it helps: with one global threshold, the hardest class drags the
+    operating point down for everyone (band3 needs t=0.4, so hard negatives
+    resembling the easy classes are also judged at 0.4). Per-class mode lets easy
+    classes keep thresholds near 1.0 while only the hard class gets slack —
+    global specificity is typically strictly better at the same per-class recall.</p>
+    <p>Semantics changes to be aware of: <code>target_met</code> requires
+    <em>every</em> class (with genuine validation samples) to hit the target — the
+    gate behaves like <code>--recall-agg min</code> even though the reported recall
+    number still uses your chosen aggregate. The global threshold is still
+    computed every epoch as the fallback and logged in the <code>threshold</code>
+    column.</p>
+  </div>
+
+  <div class="arg" id="t-per-class-min-count">
+    <div class="arg-head"><span class="flag">--per-class-min-count</span><span class="badge">int</span><span class="badge">default: 20</span></div>
+    <p>Per-class mode's small-class guard: a class whose predicted partition in
+    the validation split has fewer than this many samples falls back to the
+    global threshold instead of sweeping its own (a 10-sample partition
+    quantizes threshold choice into useless 0.1 steps). Classes with no genuine
+    validation samples at all always fall back. Fallback classes are flagged in
+    <code>class_thresholds.csv</code> and in the evaluation report. Set
+    <code>0</code> to disable the guard entirely.</p>
+  </div>
+
   <div class="arg" id="t-imbalance-ratio">
     <div class="arg-head"><span class="flag">--imbalance-ratio</span><span class="badge">float ≥ 1, inf ok</span><span class="badge">default: inf</span></div>
     <p>Caps how many hard negatives the model sees per epoch, relative to the
@@ -609,9 +667,13 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
   <h2>evaluate.py</h2>
   <p class="syn"><code>python evaluate.py CHECKPOINT.pt DATA.h5 [options]</code> —
   runs a frozen checkpoint on a split using the checkpoint's <strong>stored</strong>
-  threshold. It never re-tunes the operating point, which is what keeps a test
-  evaluation honest: the threshold was chosen on validation, the test split only
-  ever sees it applied.</p>
+  operating point — the global threshold, or the per-class threshold map plus
+  floor when the checkpoint was trained with
+  <code>--threshold-mode per-class</code>. It never re-tunes the operating point,
+  which is what keeps a test evaluation honest: thresholds were chosen on
+  validation, the test split only ever sees them applied. The report lists each
+  class's recall alongside the threshold it operates at, flagging classes on the
+  global fallback.</p>
 
   <div class="arg" id="e-checkpoint">
     <div class="arg-head"><span class="flag">checkpoint</span><span class="badge">positional · path</span><span class="badge">required</span></div>
@@ -772,8 +834,10 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     <tr><th>column</th><th>meaning</th></tr>
     <tr><td>epoch</td><td>0-based epoch index</td></tr>
     <tr><td>train_loss</td><td>mean per-sample focal loss over the epoch's draw</td></tr>
-    <tr><td>threshold</td><td>operating threshold chosen by this epoch's validation sweep</td></tr>
-    <tr><td>target_met</td><td>1 if some threshold reached <code>--target-recall</code>, else 0</td></tr>
+    <tr><td>threshold</td><td>global operating threshold from this epoch's validation sweep (in per-class mode: the global fallback)</td></tr>
+    <tr><td>threshold_mode</td><td>global or per-class</td></tr>
+    <tr><td>thr_min / thr_max</td><td>spread of per-class thresholds (equal to <code>threshold</code> in global mode)</td></tr>
+    <tr><td>target_met</td><td>1 if the target was reached at a threshold ≥ the floor (per-class mode: by every class), else 0</td></tr>
     <tr><td>recall</td><td>aggregated recall over genuine classes at the chosen threshold</td></tr>
     <tr><td>recall_agg</td><td>the aggregate in effect (macro / harmonic / min)</td></tr>
     <tr><td>specificity</td><td>fraction of validation hard negatives rejected at the threshold</td></tr>
@@ -786,13 +850,27 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     <tr><td>epoch_time_s</td><td>wall-clock seconds for train + validate</td></tr>
   </table></div>
 
+  <h3>class_thresholds.csv columns</h3>
+  <p>Long format — one row per (epoch, genuine class), written in both threshold
+  modes; this is also where the per-class recall history lives.</p>
+  <div class="table-wrap"><table>
+    <tr><th>column</th><th>meaning</th></tr>
+    <tr><td>epoch</td><td>0-based epoch index</td></tr>
+    <tr><td>class</td><td>class name</td></tr>
+    <tr><td>threshold</td><td>the threshold this class operates at (global value in global mode)</td></tr>
+    <tr><td>recall</td><td>this class's validation recall at that threshold</td></tr>
+    <tr><td>predicted_n</td><td>validation samples argmax-assigned to this class</td></tr>
+    <tr><td>fallback</td><td>per-class mode: 1 if the class used the global fallback threshold; blank in global mode</td></tr>
+  </table></div>
+
   <h3>What a checkpoint contains</h3>
   <p>Both <code>last.pt</code> and <code>best.pt</code> store: model weights, optimizer
   and AMP-scaler state, epoch index, the full CLI config, the class list and
   hard-negative index, the <code>--imagenet-norm</code> flag, <strong>the operating
-  threshold</strong>, that epoch's validation metrics, the best-so-far selection
-  key, miner scores, and ramp progress. Everything needed to resume training
-  <em>or</em> to run correct inference lives in the one file.</p>
+  threshold(s)</strong> — the global scalar plus, in per-class mode, the
+  {class: threshold} map and the floor — that epoch's validation metrics, the
+  best-so-far selection key, miner scores, and ramp progress. Everything needed
+  to resume training <em>or</em> to run correct inference lives in the one file.</p>
 </section>
 
 <section class="tool" id="recipes">
@@ -838,6 +916,7 @@ python evaluate.py runs/exp2/best.pt data.h5 --split 1    # sanity check</code><
   download_weights.py, and tests/make_synthetic_h5.py · h5 layout: h5_format.md
 </footer>
 </main>
+
 
 </body>
 </html>

@@ -77,6 +77,11 @@ def main(argv=None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     recall_agg = ckpt.get("recall_agg", "macro")
+    threshold_mode = ckpt.get("threshold_mode", "global")
+    class_thresholds = ckpt.get("class_thresholds")
+    min_threshold = ckpt.get("min_threshold", 0.0)
+    per_class = threshold_mode == "per-class" and class_thresholds is not None
+    operating = class_thresholds if per_class else threshold
 
     model = build_model(ckpt["arch"], len(classes), pretrained=False).to(device)
     model.load_state_dict(ckpt["model_state"])
@@ -88,21 +93,34 @@ def main(argv=None) -> None:
     probs, labels = collect_probs(model, loader, device,
                                   desc=f"evaluate {split_name}",
                                   progress=not args.no_progress)
-    res = apply_threshold(probs, labels, hn_index, threshold, agg=recall_agg)
-    pred = final_prediction(probs, hn_index, threshold)
+    res = apply_threshold(probs, labels, hn_index, operating, agg=recall_agg)
+    pred = final_prediction(probs, hn_index, operating)
     cm = confusion_matrix(labels, pred, len(classes))
 
+    if per_class:
+        thr_line = (f"thresholds : per-class "
+                    f"[{min(class_thresholds.values()):.4f} .. "
+                    f"{max(class_thresholds.values()):.4f}] "
+                    f"(global fallback {threshold:.4f}; chosen on validation)")
+    else:
+        thr_line = f"threshold  : {threshold:.6f} (chosen on validation during training)"
+
+    fallback_set = set(ckpt.get("val_metrics", {}).get("fallback_classes", []))
     lines = [
         f"checkpoint : {args.checkpoint} (epoch {ckpt['epoch']}, arch {ckpt['arch']})",
         f"dataset    : {args.h5}  split={split_name}  n={len(ds)}",
-        f"threshold  : {threshold:.6f} (chosen on validation during training)",
+        thr_line,
+        f"min-threshold floor            : {min_threshold:.4f}",
         f"{recall_agg} recall (genuine classes) : {res['recall']:.4f}",
         f"HN specificity at threshold    : {res['specificity']:.4f}",
         f"genuine acceptance rate (TPR)  : {res['tpr']:.4f}",
-        "per-class recall:",
+        "per-class recall / threshold:",
     ]
     for c, r in res["per_class_recall"].items():
-        lines.append(f"  {classes[c]:<20s} {r:.4f}   (n={int((labels == c).sum())})")
+        thr_c = class_thresholds.get(c, threshold) if per_class else threshold
+        note = "  [global fallback]" if per_class and c in fallback_set else ""
+        lines.append(f"  {classes[c]:<20s} {r:.4f}  thr {thr_c:.4f}   "
+                     f"(n={int((labels == c).sum())}){note}")
 
     try:
         fpr, tpr, auc = genuine_vs_hn_roc(probs, labels, hn_index)
@@ -116,7 +134,8 @@ def main(argv=None) -> None:
 
     cal = calibration_bins(probs, labels, hn_index)
     lines.append(f"ECE (genuineness score, {cal['n_bins']} bins) : {cal['ece']:.4f}")
-    plot_calibration(cal, out_dir / "calibration.png", threshold=threshold)
+    plot_calibration(cal, out_dir / "calibration.png",
+                     threshold=None if per_class else threshold)
 
     rocs = {}
     for c in range(len(classes)):

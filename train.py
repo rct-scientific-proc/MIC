@@ -33,15 +33,17 @@ from tqdm import tqdm
 from dataset import SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset, validate_h5
 from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
-                     sweep_threshold)
+                     sweep_class_thresholds, sweep_threshold)
 from model import ARCHS, build_model
 from sampler import HardNegativeMiner, ImbalanceCapSampler
 
 CSV_FIELDS = [
-    "epoch", "train_loss", "threshold", "target_met", "recall", "recall_agg",
-    "specificity", "max_recall", "auroc", "hn_alpha", "imbalance_ratio",
-    "ramp_progress", "lr", "epoch_time_s",
+    "epoch", "train_loss", "threshold", "threshold_mode", "thr_min", "thr_max",
+    "target_met", "recall", "recall_agg", "specificity", "max_recall", "auroc",
+    "hn_alpha", "imbalance_ratio", "ramp_progress", "lr", "epoch_time_s",
 ]
+CLASS_CSV_FIELDS = ["epoch", "class", "threshold", "recall", "predicted_n",
+                    "fallback"]
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -80,6 +82,19 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "(arithmetic mean; one collapsed class can hide behind "
                         "strong ones), harmonic (dominated by the worst classes; "
                         "default), or min (strictest, worst single class)")
+    o.add_argument("--min-threshold", type=float, default=0.0,
+                   help="floor no operating threshold may go below; if the "
+                        "recall target is only reachable beneath it, the epoch "
+                        "operates AT the floor with target_met=0")
+    o.add_argument("--threshold-mode", choices=("global", "per-class"),
+                   default="global",
+                   help="'global': one threshold for all classes; 'per-class': "
+                        "each genuine class gets its own threshold (applied by "
+                        "predicted class), so easy classes keep high specificity "
+                        "while hard ones get the slack they need")
+    o.add_argument("--per-class-min-count", type=int, default=20,
+                   help="per-class mode: classes with fewer predicted validation "
+                        "samples than this fall back to the global threshold")
     o.add_argument("--imbalance-ratio", type=float, default=math.inf,
                    help="max hard negatives per epoch = ratio * genuine count (1..inf)")
     o.add_argument("--focal-gamma", type=float, default=2.0)
@@ -174,10 +189,18 @@ def ramp_values(args, ramp_progress: int, n_genuine: int, n_hn: int) -> tuple[fl
 
 
 def validate(model, loader, device, hn_index, target_recall, recall_agg,
+             min_threshold: float = 0.0, threshold_mode: str = "global",
+             per_class_min_count: int = 20,
              desc: str = "validate", progress: bool = True) -> dict:
     probs, labels = collect_probs(model, loader, device, desc=desc,
                                   progress=progress)
-    op = sweep_threshold(probs, labels, hn_index, target_recall, agg=recall_agg)
+    if threshold_mode == "per-class":
+        op = sweep_class_thresholds(probs, labels, hn_index, target_recall,
+                                    agg=recall_agg, min_threshold=min_threshold,
+                                    min_count=per_class_min_count)
+    else:
+        op = sweep_threshold(probs, labels, hn_index, target_recall,
+                             agg=recall_agg, min_threshold=min_threshold)
     try:
         _, _, auroc = genuine_vs_hn_roc(probs, labels, hn_index)
     except ValueError:
@@ -210,6 +233,9 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
         "arch": args.arch,
         "imagenet_norm": args.imagenet_norm,
         "threshold": op["threshold"],
+        "threshold_mode": args.threshold_mode,
+        "class_thresholds": op.get("class_thresholds"),
+        "min_threshold": args.min_threshold,
         "recall_agg": args.recall_agg,
         "val_metrics": op,
         "best_key": best_key,
@@ -269,7 +295,10 @@ def main(argv=None) -> None:
         optimizer.load_state_dict(ckpt["optimizer_state"])
         scaler.load_state_dict(ckpt["scaler_state"])
         start_epoch = ckpt["epoch"] + 1
-        best_key = ckpt.get("best_key")
+        # best_key describes out_dir/best.pt; when resuming into a fresh
+        # directory that file doesn't exist, so the new run must track its
+        # own best from scratch or it may never write one.
+        best_key = ckpt.get("best_key") if (out_dir / "best.pt").exists() else None
         ramp_progress = ckpt.get("ramp_progress", 0)
         if miner is not None and ckpt.get("miner_state") is not None:
             miner.load_state_dict(ckpt["miner_state"])
@@ -281,6 +310,15 @@ def main(argv=None) -> None:
     writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
     if new_csv:
         writer.writeheader()
+
+    # Long-format per-class log: one row per (epoch, genuine class) in both
+    # threshold modes — the per-class recall history lives here.
+    class_csv_path = out_dir / "class_thresholds.csv"
+    new_class_csv = not class_csv_path.exists()
+    class_csv_file = open(class_csv_path, "a", newline="")
+    class_writer = csv.DictWriter(class_csv_file, fieldnames=CLASS_CSV_FIELDS)
+    if new_class_csv:
+        class_writer.writeheader()
 
     epochs_since_best = 0
     for epoch in range(start_epoch, args.epochs):
@@ -295,16 +333,23 @@ def main(argv=None) -> None:
                                      scaler, device, amp, miner=miner,
                                      desc=f"epoch {epoch} train", progress=progress)
         op = validate(model, val_loader, device, hn_index, args.target_recall,
-                      args.recall_agg, desc=f"epoch {epoch} validate",
-                      progress=progress)
+                      args.recall_agg, min_threshold=args.min_threshold,
+                      threshold_mode=args.threshold_mode,
+                      per_class_min_count=args.per_class_min_count,
+                      desc=f"epoch {epoch} validate", progress=progress)
         dt = time.time() - t0
 
         if op["target_met"] and args.ramp_epochs > 0:
             ramp_progress = min(ramp_progress + 1, args.ramp_epochs)
 
+        class_thr = op.get("class_thresholds")
+        thr_values = list(class_thr.values()) if class_thr else [op["threshold"]]
         writer.writerow({
             "epoch": epoch, "train_loss": f"{train_loss:.6f}",
-            "threshold": f"{op['threshold']:.6f}", "target_met": int(op["target_met"]),
+            "threshold": f"{op['threshold']:.6f}",
+            "threshold_mode": args.threshold_mode,
+            "thr_min": f"{min(thr_values):.6f}", "thr_max": f"{max(thr_values):.6f}",
+            "target_met": int(op["target_met"]),
             "recall": f"{op['recall']:.6f}", "recall_agg": op["recall_agg"],
             "specificity": f"{op['specificity']:.6f}",
             "max_recall": f"{op['max_recall']:.6f}",
@@ -314,14 +359,29 @@ def main(argv=None) -> None:
         })
         csv_file.flush()
 
+        fallback_set = set(op.get("fallback_classes", []))
+        for c, r in sorted(op["per_class_recall"].items()):
+            class_writer.writerow({
+                "epoch": epoch, "class": classes[c],
+                "threshold": f"{(class_thr or {}).get(c, op['threshold']):.6f}",
+                "recall": f"{r:.6f}",
+                "predicted_n": op["predicted_counts"].get(c, 0),
+                "fallback": int(c in fallback_set) if class_thr else "",
+            })
+        class_csv_file.flush()
+
         key = selection_key(op)
         improved = best_key is None or key > tuple(best_key)
         marker = " *" if improved else ""
+        if class_thr:
+            thr_txt = f"thr {min(thr_values):.3f}..{max(thr_values):.3f}"
+        else:
+            thr_txt = f"thr {op['threshold']:.4f}"
         print(
             f"epoch {epoch:3d}  loss {train_loss:.4f}  "
             f"{op['recall_agg']}-recall {op['recall']:.4f}"
             f"{'' if op['target_met'] else ' (below target)'}  "
-            f"spec {op['specificity']:.4f}  thr {op['threshold']:.4f}  "
+            f"spec {op['specificity']:.4f}  {thr_txt}  "
             f"auroc {op['auroc']:.4f}  {dt:.1f}s{marker}"
         )
 
@@ -342,6 +402,7 @@ def main(argv=None) -> None:
             break
 
     csv_file.close()
+    class_csv_file.close()
     print(f"done. checkpoints and metrics.csv in {out_dir}")
 
 

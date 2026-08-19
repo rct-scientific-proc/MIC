@@ -75,17 +75,22 @@ def plot_genuine_vs_hn_roc(fpr, tpr, auc: float, path,
             ha="right", fontsize=9, color=INK_2)
 
     if operating_point is not None:
-        # The point lies on the binary curve: y is the genuine acceptance
-        # rate (TPR), not macro recall (which also demands correct class).
+        # The point's y is the genuine acceptance rate (TPR), not recall
+        # (which also demands correct class). With one global threshold it
+        # lies exactly on the binary curve; per-class thresholds are not a
+        # single cut of s, so their point generally sits off the curve.
         x = 1.0 - operating_point["specificity"]
         y = operating_point["tpr"]
         ax.plot([x], [y], marker="o", markersize=9, color=SERIES[1],
                 markeredgecolor=SURFACE, markeredgewidth=2, zorder=5)
+        thr = operating_point.get("threshold")
+        thr_txt = (f"thr {thr:.4f}" if thr is not None
+                   else "per-class thresholds (off-curve)")
         # Keep the label inside the axes wherever the point lands.
         va = "top" if y > 0.75 else "bottom"
         dy = -10 if va == "top" else 10
         ax.annotate(
-            f"operating point\nthr {operating_point['threshold']:.4f}\n"
+            f"operating point\n{thr_txt}\n"
             f"{operating_point.get('recall_agg', 'macro')} recall "
             f"{operating_point['recall']:.3f}, "
             f"spec {operating_point['specificity']:.3f}",
@@ -173,6 +178,11 @@ def plot_history(csv_path, path) -> None:
     ]
     for name, label, slot in unit_series:
         ax1.plot(epochs, col(name), color=SERIES[slot], linewidth=2, label=label)
+    # Per-class threshold spread as a band around the global threshold line
+    # (collapses to nothing in global mode, where thr_min == thr_max).
+    if "thr_min" in rows[0] and "thr_max" in rows[0]:
+        ax1.fill_between(epochs, col("thr_min"), col("thr_max"),
+                         color=SERIES[3], alpha=0.18, linewidth=0)
     ax1.set_ylim(-0.04, 1.04)
     ax1.set_ylabel("value")
     ax1.set_title("Validation metrics per epoch")
