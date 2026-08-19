@@ -196,6 +196,115 @@ def plot_history(csv_path, path) -> None:
     _save(fig, path)
 
 
+def plot_per_class_recall_history(class_csv_path, path) -> list[str]:
+    """Per-class validation recall over epochs, from class_thresholds.csv.
+
+    One line per class in fixed palette order (by first appearance). Past
+    MAX_ROC_SERIES classes, keeps the worst-final-recall ones and returns the
+    dropped names — callers should report them, never drop silently.
+    """
+    rows = list(csv.DictReader(open(class_csv_path, newline="")))
+    if not rows:
+        raise ValueError(f"{class_csv_path}: no rows to plot")
+
+    series: dict[str, tuple[list, list]] = {}
+    for r in rows:
+        xs, ys = series.setdefault(r["class"], ([], []))
+        xs.append(int(r["epoch"]))
+        ys.append(float(r["recall"]))
+
+    order = list(series)  # palette follows the entity: first-appearance order
+    dropped: list[str] = []
+    if len(order) > MAX_ROC_SERIES:
+        by_final = sorted(order, key=lambda n: series[n][1][-1])
+        keep = set(by_final[:MAX_ROC_SERIES])
+        dropped = [n for n in order if n not in keep]
+        order = [n for n in order if n in keep]
+
+    fig, ax = _new_axes((7.2, 4.4))
+    for i, name in enumerate(order):
+        xs, ys = series[name]
+        ax.plot(xs, ys, color=SERIES[i % len(SERIES)], linewidth=2, label=name)
+    ax.set_ylim(-0.04, 1.04)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("validation recall")
+    title = "Per-class recall per epoch"
+    if dropped:
+        title += f" (worst {len(order)} of {len(series)} classes)"
+    ax.set_title(title)
+    _legend(ax)
+    _save(fig, path)
+    return dropped
+
+
+EVENT_MARKS = {  # base event -> (marker, palette slot)
+    "raise": ("^", 2), "hold": ("o", 0), "rewind": ("v", 7), "ceiling": ("s", 3),
+}
+
+
+def plot_controller_timeline(csv_path, path) -> None:
+    """Smart-mode controller history: pressure with boundary-event markers on
+    top, cycled learning rate (log scale) below. Skips rows from non-smart
+    epochs (empty pressure column)."""
+    rows = [r for r in csv.DictReader(open(csv_path, newline=""))
+            if r.get("pressure")]
+    if not rows:
+        raise ValueError(f"{csv_path}: no smart-mode rows to plot")
+    epochs = [int(r["epoch"]) for r in rows]
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(7.2, 5.2), facecolor=SURFACE, sharex=True,
+        height_ratios=[1.6, 1], constrained_layout=True,
+    )
+    _style_axes(ax1)
+    _style_axes(ax2)
+
+    ax1.step(epochs, [float(r["pressure"]) for r in rows], where="post",
+             color=SERIES[0], linewidth=2)
+    seen_events = set()
+    for r in rows:
+        if not r["event"]:
+            continue
+        base = r["event"].split()[0]
+        mark, slot = EVENT_MARKS.get(base, ("o", 0))
+        label = base if base not in seen_events else None
+        seen_events.add(base)
+        ax1.plot([int(r["epoch"])], [float(r["pressure"])], marker=mark,
+                 markersize=8, color=SERIES[slot], markeredgecolor=SURFACE,
+                 markeredgewidth=1.2, linestyle="none", label=label, zorder=5)
+    ax1.set_ylim(-0.05, 1.1)
+    ax1.set_ylabel("hard-negative pressure")
+    ax1.set_title("Smart controller timeline")
+    if seen_events:
+        _legend(ax1)
+
+    ax2.plot(epochs, [float(r["lr"]) for r in rows], color=SERIES[6], linewidth=2)
+    ax2.set_yscale("log")
+    ax2.set_ylabel("learning rate")
+    ax2.set_xlabel("epoch")
+    _save(fig, path)
+
+
+def plot_sample_grid(images: list[np.ndarray], captions: list[str], title: str,
+                     path, ncols: int = 4) -> None:
+    """Grid of raw dataset thumbnails (uint8 HWC) with per-sample captions —
+    used by the report to show the actual problem samples."""
+    n = len(images)
+    ncols = min(ncols, max(n, 1))
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(1.9 * ncols, 2.3 * nrows),
+                             facecolor=SURFACE, squeeze=False)
+    for ax in axes.flat:
+        ax.set_axis_off()
+    for ax, img, cap in zip(axes.flat, images, captions):
+        ax.imshow(img.squeeze() if img.shape[-1] == 1 else img,
+                  cmap="gray" if img.shape[-1] == 1 else None,
+                  vmin=0, vmax=255)
+        ax.set_title(cap, fontsize=7, color=INK_2)
+    fig.suptitle(title, fontsize=11, color=INK)
+    _save(fig, path)
+
+
 def plot_calibration(cal: dict, path, threshold: float | None = None) -> None:
     """Reliability diagram for the genuineness score.
 

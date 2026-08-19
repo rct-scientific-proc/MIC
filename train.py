@@ -74,6 +74,16 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="early-stop after N epochs without improvement (0 = off)")
     t.add_argument("--no-progress", action="store_true",
                    help="disable per-batch progress bars (for logged runs)")
+
+    rp = p.add_argument_group("report")
+    rp.add_argument("--no-report", action="store_true",
+                    help="skip the end-of-training PDF report")
+    rp.add_argument("--report-test", action="store_true",
+                    help="report's inference pass uses the TEST split instead "
+                         "of validation (opt-in: keeps routine runs from "
+                         "quietly turning test into a second validation set)")
+    rp.add_argument("--report-thumbs", type=int, default=16,
+                    help="thumbnails per problem-sample grid in the report")
     t.add_argument("--resume", default=None, help="checkpoint to resume from")
 
     o = p.add_argument_group("objective")
@@ -584,6 +594,20 @@ def main(argv=None) -> None:
 
     csv_file.close()
     class_csv_file.close()
+
+    if not args.no_report and (out_dir / "best.pt").exists():
+        try:
+            from dataset import SPLIT_TEST
+            from report import build_report
+            path = build_report(
+                out_dir, args.h5,
+                split=SPLIT_TEST if args.report_test else SPLIT_VAL,
+                thumbs=args.report_thumbs, device=str(device),
+                progress=not args.no_progress)
+            print(f"report: {path}")
+        except Exception as e:  # a report failure must never eat a finished run
+            print(f"report generation failed (training outputs unaffected): {e}")
+
     print(f"done. checkpoints and metrics.csv in {out_dir}")
 
 

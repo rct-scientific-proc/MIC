@@ -72,6 +72,7 @@ def main() -> None:
                  "roc_genuine_vs_hn.png", "roc_per_class.png",
                  "calibration.png", "history.png"):
         assert (out / "eval" / name).exists(), f"missing eval output {name}"
+    assert (out / "report.pdf").exists(), "missing end-of-training PDF report"
 
     report = (out / "eval" / "report.txt").read_text(encoding="utf-8")
     print("\n--- report.txt ---\n" + report)
@@ -115,6 +116,8 @@ def main() -> None:
     boosts = sorted({(r["class"], r["alpha"], r["repeat"]) for r in class_rows
                      if float(r["alpha"]) > 1.0 or int(r["repeat"]) > 1})
     print("rescue boosts seen:", boosts or "none (all classes at target)")
+    assert (out_sm / "report.pdf").exists(), "missing smart-run PDF report"
+    assert (out_sm / "report_assets" / "timeline.png").exists()
 
     run(REPO / "evaluate.py", out_sm / "best.pt", h5, "--out-dir", out_sm / "eval", *GPU)
     assert (out_sm / "eval" / "report.txt").exists()
