@@ -12,16 +12,23 @@ start of each run, and is gitignored.
 
 from __future__ import annotations
 
+import csv
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import torch
 
 REPO = Path(__file__).resolve().parent.parent
 OUT_ROOT = Path(__file__).resolve().parent / "runs"
 sys.path.insert(0, str(REPO))
 
 from make_synthetic_h5 import make_dataset  # noqa: E402
+
+# Use the GPU explicitly when present (train legs also get AMP).
+GPU = ["--device", "cuda"] if torch.cuda.is_available() else []
+GPU_TRAIN = GPU + (["--amp"] if GPU else [])
 
 
 def run(*argv) -> None:
@@ -47,7 +54,7 @@ def main() -> None:
         "--batch-size", "32", "--target-recall", "0.98",
         "--imbalance-ratio", "3.0", "--imbalance-ratio-start", "1.0",
         "--ramp-epochs", "2", "--hn-alpha", "0.25", "--hn-alpha-end", "1.0",
-        "--out-dir", out, "--patience", "0", "--seed", "1",
+        "--out-dir", out, "--patience", "0", "--seed", "1", *GPU_TRAIN,
     ]
     # short first leg with multiprocess loading (the Windows-sensitive path)
     run(*common, "--epochs", "3", "--workers", "2")
@@ -60,7 +67,7 @@ def main() -> None:
     run(*common, "--epochs", "40", "--workers", "0",
         "--resume", out / "last.pt")
 
-    run(REPO / "evaluate.py", out / "best.pt", h5, "--out-dir", out / "eval")
+    run(REPO / "evaluate.py", out / "best.pt", h5, "--out-dir", out / "eval", *GPU)
     for name in ("report.txt", "confusion.csv", "confusion.png",
                  "roc_genuine_vs_hn.png", "roc_per_class.png",
                  "calibration.png", "history.png"):
@@ -76,14 +83,35 @@ def main() -> None:
         "--batch-size", "32", "--target-recall", "0.98",
         "--threshold-mode", "per-class", "--per-class-min-count", "5",
         "--min-threshold", "0.05", "--out-dir", out_pc, "--patience", "0",
-        "--seed", "1", "--epochs", "43", "--workers", "0",
+        "--seed", "1", "--epochs", "43", "--workers", "0", *GPU_TRAIN,
         "--resume", out / "last.pt")
     assert (out_pc / "class_thresholds.csv").exists()
 
-    run(REPO / "evaluate.py", out_pc / "best.pt", h5, "--out-dir", out_pc / "eval")
+    run(REPO / "evaluate.py", out_pc / "best.pt", h5, "--out-dir", out_pc / "eval", *GPU)
     pc_report = (out_pc / "eval" / "report.txt").read_text(encoding="utf-8")
     assert "per-class" in pc_report, "per-class mode not reflected in report"
     print("\n--- per-class report.txt ---\n" + pc_report)
+
+    # smart-mode leg: cyclic LR + pressure controller, warm-started so the
+    # target is reachable and raise/milestone events actually fire
+    out_sm = OUT_ROOT / "run_smart"
+    run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+        "--batch-size", "32", "--target-recall", "0.9",
+        "--smart", "--lr-cycle-epochs", "3", "--pressure-step", "0.5",
+        "--imbalance-ratio", "3.0", "--imbalance-ratio-start", "1.0",
+        "--hn-alpha", "0.25", "--hn-alpha-end", "1.0",
+        "--out-dir", out_sm, "--patience", "0", "--seed", "1",
+        "--epochs", "52", "--workers", "0", *GPU_TRAIN,
+        "--resume", out / "last.pt")
+    for name in ("best.pt", "last.pt", "cycle_best.pt", "metrics.csv"):
+        assert (out_sm / name).exists(), f"missing smart output {name}"
+    events = [r["event"] for r in csv.DictReader(open(out_sm / "metrics.csv"))
+              if r["event"]]
+    assert events, "smart run produced no cycle-boundary events"
+    print("smart events:", events)
+
+    run(REPO / "evaluate.py", out_sm / "best.pt", h5, "--out-dir", out_sm / "eval", *GPU)
+    assert (out_sm / "eval" / "report.txt").exists()
 
     print(f"\noutputs kept in {OUT_ROOT}")
     print("SMOKE TEST PASSED")

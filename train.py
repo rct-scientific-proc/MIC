@@ -30,6 +30,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from controller import SmartController
 from dataset import SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset, validate_h5
 from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
@@ -40,7 +41,8 @@ from sampler import HardNegativeMiner, ImbalanceCapSampler
 CSV_FIELDS = [
     "epoch", "train_loss", "threshold", "threshold_mode", "thr_min", "thr_max",
     "target_met", "recall", "recall_agg", "specificity", "max_recall", "auroc",
-    "hn_alpha", "imbalance_ratio", "ramp_progress", "lr", "epoch_time_s",
+    "hn_alpha", "imbalance_ratio", "ramp_progress", "pressure", "cycle",
+    "event", "lr", "epoch_time_s",
 ]
 CLASS_CSV_FIELDS = ["epoch", "class", "threshold", "recall", "predicted_n",
                     "fallback"]
@@ -115,6 +117,28 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="starting imbalance ratio (default: same as --imbalance-ratio; "
                         "set lower, e.g. 1.0, to begin with few hard negatives)")
 
+    s = p.add_argument_group(
+        "smart mode",
+        "adaptive alternative to the fixed ramp: cyclic (half-cosine) learning "
+        "rate, with hard-negative pressure raised/held/rewound at cycle "
+        "boundaries based on validation metrics. Pressure endpoints reuse the "
+        "ramp flags (--hn-alpha -> --hn-alpha-end, --imbalance-ratio-start -> "
+        "--imbalance-ratio). Mutually exclusive with --ramp-epochs.",
+    )
+    s.add_argument("--smart", action="store_true",
+                   help="enable the smart controller")
+    s.add_argument("--lr-cycle-epochs", type=int, default=10,
+                   help="epochs per LR cycle; decisions happen at the trough")
+    s.add_argument("--lr-min", type=float, default=None,
+                   help="trough learning rate (default: --lr / 25)")
+    s.add_argument("--pressure-step", type=float, default=0.25,
+                   help="initial pressure increment per successful cycle")
+    s.add_argument("--max-rewinds", type=int, default=3,
+                   help="rewinds at one pressure level before accepting it "
+                        "as the run's ceiling")
+    s.add_argument("--keep-top-k", type=int, default=3,
+                   help="snapshots/ archive size (best cycle checkpoints)")
+
     mi = p.add_argument_group("hard-negative mining")
     mi.add_argument("--no-mining", action="store_true",
                     help="uniform hard-negative subsampling instead of error-driven")
@@ -125,7 +149,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     d.add_argument("--imagenet-norm", action="store_true",
                    help="ImageNet mean/std normalization (default: just /255)")
 
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.smart and args.ramp_epochs > 0:
+        p.error("--smart and --ramp-epochs are mutually exclusive (smart mode "
+                "replaces the fixed ramp)")
+    if args.lr_min is None:
+        args.lr_min = args.lr / 25
+    return args
 
 
 def seed_everything(seed: int) -> None:
@@ -161,22 +191,18 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
     return total_loss / max(total_n, 1)
 
 
-def ramp_values(args, ramp_progress: int, n_genuine: int, n_hn: int) -> tuple[float, float]:
-    """(hn_alpha, imbalance_ratio) at the given ramp progress.
+def pressure_values(args, f: float, n_genuine: int, n_hn: int) -> tuple[float, float]:
+    """(hn_alpha, imbalance_ratio) at pressure fraction f in [0, 1].
 
-    Linear interpolation over --ramp-epochs steps. An infinite ratio endpoint
-    is interpolated in budget space (inf == the ratio that admits every hard
-    negative), so the hard-negative count still grows smoothly.
+    Linear interpolation between the ramp endpoint flags. An infinite ratio
+    endpoint is interpolated in budget space (inf == the ratio that admits
+    every hard negative), so the hard-negative count still grows smoothly.
     """
     alpha_end = args.hn_alpha_end if args.hn_alpha_end is not None else args.hn_alpha
     ratio_start = (args.imbalance_ratio_start
                    if args.imbalance_ratio_start is not None else args.imbalance_ratio)
     ratio_end = args.imbalance_ratio
 
-    if args.ramp_epochs <= 0:
-        return alpha_end, ratio_end
-
-    f = min(1.0, ramp_progress / args.ramp_epochs)
     full_ratio = max(1.0, n_hn / max(n_genuine, 1))  # ratio admitting all HN
     rs = full_ratio if math.isinf(ratio_start) else ratio_start
     re = full_ratio if math.isinf(ratio_end) else ratio_end
@@ -186,6 +212,15 @@ def ramp_values(args, ramp_progress: int, n_genuine: int, n_hn: int) -> tuple[fl
     if f >= 1.0 and math.isinf(ratio_end):
         ratio = math.inf
     return hn_alpha, ratio
+
+
+def ramp_values(args, ramp_progress: int, n_genuine: int, n_hn: int) -> tuple[float, float]:
+    """(hn_alpha, imbalance_ratio) at the given ramp progress (fixed-ramp
+    mode; ramp_epochs == 0 means the end values apply from epoch 0)."""
+    if args.ramp_epochs <= 0:
+        return pressure_values(args, 1.0, n_genuine, n_hn)
+    return pressure_values(args, min(1.0, ramp_progress / args.ramp_epochs),
+                           n_genuine, n_hn)
 
 
 def validate(model, loader, device, hn_index, target_recall, recall_agg,
@@ -221,7 +256,8 @@ def selection_key(op: dict) -> tuple:
 
 
 def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classes,
-                    hn_index, op, best_key, miner=None, ramp_progress=0) -> None:
+                    hn_index, op, best_key, miner=None, ramp_progress=0,
+                    controller=None) -> None:
     torch.save({
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
@@ -241,6 +277,7 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
         "best_key": best_key,
         "miner_state": miner.state_dict() if miner is not None else None,
         "ramp_progress": ramp_progress,
+        "controller_state": controller.state_dict() if controller is not None else None,
     }, path)
 
 
@@ -286,6 +323,14 @@ def main(argv=None) -> None:
                                   weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
 
+    controller = None
+    if args.smart:
+        controller = SmartController(
+            lr_max=args.lr, lr_min=args.lr_min, cycle_epochs=args.lr_cycle_epochs,
+            pressure_step=args.pressure_step, max_rewinds=args.max_rewinds,
+            keep_top_k=args.keep_top_k,
+        )
+
     start_epoch = 0
     best_key = None
     ramp_progress = 0
@@ -302,6 +347,8 @@ def main(argv=None) -> None:
         ramp_progress = ckpt.get("ramp_progress", 0)
         if miner is not None and ckpt.get("miner_state") is not None:
             miner.load_state_dict(ckpt["miner_state"])
+        if controller is not None and ckpt.get("controller_state") is not None:
+            controller.load_state_dict(ckpt["controller_state"], out_dir=out_dir)
         print(f"resumed from {args.resume} at epoch {start_epoch}")
 
     csv_path = out_dir / "metrics.csv"
@@ -321,9 +368,21 @@ def main(argv=None) -> None:
         class_writer.writeheader()
 
     epochs_since_best = 0
+    improved_this_cycle = False
+    stop = False
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
-        hn_alpha, ratio = ramp_values(args, ramp_progress, n_genuine, n_hn)
+        if controller is not None:
+            hn_alpha, ratio = pressure_values(args, controller.p_try,
+                                              n_genuine, n_hn)
+            lr = controller.lr_at()
+            for g in optimizer.param_groups:
+                g["lr"] = lr
+            p_used, cycle_used = controller.p_try, controller.cycle
+        else:
+            hn_alpha, ratio = ramp_values(args, ramp_progress, n_genuine, n_hn)
+            lr = args.lr
+            p_used, cycle_used = "", ""
         criterion.set_hn_alpha(hn_alpha)
         sampler.set_ratio(ratio)
         sampler.set_epoch(epoch)
@@ -339,8 +398,57 @@ def main(argv=None) -> None:
                       desc=f"epoch {epoch} validate", progress=progress)
         dt = time.time() - t0
 
-        if op["target_met"] and args.ramp_epochs > 0:
+        if controller is None and op["target_met"] and args.ramp_epochs > 0:
             ramp_progress = min(ramp_progress + 1, args.ramp_epochs)
+
+        key = selection_key(op)
+        improved = best_key is None or key > tuple(best_key)
+
+        # best.pt and cycle_best.pt hold the weights that were actually
+        # evaluated this epoch — saved before any boundary rewind below.
+        ckpt_kw = dict(model=model, optimizer=optimizer, scaler=scaler,
+                       epoch=epoch, args=args, classes=classes,
+                       hn_index=hn_index, op=op, miner=miner,
+                       ramp_progress=ramp_progress, controller=controller)
+        if controller is not None:
+            improved_this_cycle = improved_this_cycle or improved
+            if controller.observe(key):
+                save_checkpoint(out_dir / "cycle_best.pt", best_key=best_key,
+                                **ckpt_kw)
+        if improved:
+            best_key = key
+            epochs_since_best = 0
+            save_checkpoint(out_dir / "best.pt", best_key=best_key, **ckpt_kw)
+        else:
+            epochs_since_best += 1
+
+        # --- cycle boundary: decide, possibly rewind -------------------
+        event = ""
+        boundary_msg = None
+        op_for_last = op
+        if controller is not None:
+            controller.epoch_in_cycle += 1
+            if controller.at_boundary():
+                controller.cycles_since_best = (
+                    0 if improved_this_cycle else controller.cycles_since_best + 1)
+                improved_this_cycle = False
+                boundary_cycle = controller.cycle
+                event = controller.end_cycle(out_dir)
+                if event in ("rewind", "ceiling") and (out_dir / "milestone.pt").exists():
+                    mckpt = torch.load(out_dir / "milestone.pt",
+                                       map_location=device, weights_only=False)
+                    model.load_state_dict(mckpt["model_state"])
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
+                                                  weight_decay=args.weight_decay)
+                    scaler = torch.amp.GradScaler(device.type, enabled=amp)
+                    op_for_last = mckpt["val_metrics"]
+                boundary_msg = (f"  cycle {boundary_cycle}: {event}  ->  "
+                                f"pressure {controller.p_try:.2f} "
+                                f"(stable {controller.p_stable:.2f}, "
+                                f"step {controller.step:.3f}, "
+                                f"rewinds {controller.rewinds})")
+                if args.patience and controller.cycles_since_best >= args.patience:
+                    stop = True
 
         class_thr = op.get("class_thresholds")
         thr_values = list(class_thr.values()) if class_thr else [op["threshold"]]
@@ -355,7 +463,9 @@ def main(argv=None) -> None:
             "max_recall": f"{op['max_recall']:.6f}",
             "auroc": f"{op['auroc']:.6f}", "hn_alpha": f"{hn_alpha:.4f}",
             "imbalance_ratio": ratio, "ramp_progress": ramp_progress,
-            "lr": args.lr, "epoch_time_s": f"{dt:.1f}",
+            "pressure": p_used if p_used == "" else f"{p_used:.3f}",
+            "cycle": cycle_used, "event": event,
+            "lr": f"{lr:.3e}", "epoch_time_s": f"{dt:.1f}",
         })
         csv_file.flush()
 
@@ -370,34 +480,37 @@ def main(argv=None) -> None:
             })
         class_csv_file.flush()
 
-        key = selection_key(op)
-        improved = best_key is None or key > tuple(best_key)
         marker = " *" if improved else ""
         if class_thr:
             thr_txt = f"thr {min(thr_values):.3f}..{max(thr_values):.3f}"
         else:
             thr_txt = f"thr {op['threshold']:.4f}"
+        smart_txt = (f"  [c{cycle_used} p {p_used:.2f} lr {lr:.1e}]"
+                     if controller is not None else "")
         print(
             f"epoch {epoch:3d}  loss {train_loss:.4f}  "
             f"{op['recall_agg']}-recall {op['recall']:.4f}"
             f"{'' if op['target_met'] else ' (below target)'}  "
             f"spec {op['specificity']:.4f}  {thr_txt}  "
-            f"auroc {op['auroc']:.4f}  {dt:.1f}s{marker}"
+            f"auroc {op['auroc']:.4f}  {dt:.1f}s{smart_txt}{marker}"
         )
+        if boundary_msg:
+            print(boundary_msg)
+        if stop:
+            print(f"early stop: no improvement for {args.patience} cycles")
 
-        ckpt_kw = dict(model=model, optimizer=optimizer, scaler=scaler, epoch=epoch,
-                       args=args, classes=classes, hn_index=hn_index, op=op,
-                       miner=miner, ramp_progress=ramp_progress)
-        if improved:
-            best_key = key
-            epochs_since_best = 0
-            save_checkpoint(out_dir / "best.pt", best_key=best_key, **ckpt_kw)
-        else:
-            epochs_since_best += 1
+        # last.pt carries the post-decision state (post-rewind weights and
+        # controller state), so --resume continues exactly where the
+        # controller left off; its metrics/threshold match its weights.
+        save_checkpoint(out_dir / "last.pt", model=model, optimizer=optimizer,
+                        scaler=scaler, epoch=epoch, args=args, classes=classes,
+                        hn_index=hn_index, op=op_for_last, miner=miner,
+                        ramp_progress=ramp_progress, controller=controller,
+                        best_key=best_key)
 
-        save_checkpoint(out_dir / "last.pt", best_key=best_key, **ckpt_kw)
-
-        if args.patience and epochs_since_best >= args.patience:
+        if stop:
+            break
+        if controller is None and args.patience and epochs_since_best >= args.patience:
             print(f"early stop: no improvement for {args.patience} epochs")
             break
 

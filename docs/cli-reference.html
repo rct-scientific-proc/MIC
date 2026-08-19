@@ -616,6 +616,74 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     step.</p>
   </div>
 
+  <h3>Smart mode (adaptive controller)</h3>
+  <p class="syn">An adaptive alternative to the fixed ramp (mutually exclusive with
+  <code>--ramp-epochs</code>). Training is structured as <strong>LR cycles</strong>:
+  within a cycle the learning rate follows a half-cosine from <code>--lr</code>
+  down to <code>--lr-min</code>, and control decisions happen only at the trough,
+  where the model is settled and evaluable. A pressure level p ∈ [0, 1] maps
+  through the same endpoint flags as the ramp (<code>--hn-alpha</code> →
+  <code>--hn-alpha-end</code>, <code>--imbalance-ratio-start</code> →
+  <code>--imbalance-ratio</code>). At each boundary, the cycle's best validation
+  epoch decides:</p>
+  <div class="formula">raise    target met, matched/beat last milestone -> cycle best becomes
+         milestone.pt, pressure += step, next cycle restarts at lr_max
+hold     target met but regressed vs milestone -> retry at same pressure
+rewind   target never met -> reload milestone weights + FRESH optimizer,
+         step /= 2, retry from stable pressure + smaller step
+ceiling  &gt; --max-rewinds failures at one level -> accept the stable
+         pressure as this run's ceiling and keep training there</div>
+  <p>Rewinds restore the last <em>stable-at-pressure</em> checkpoint, not the
+  overall best (which may predate the current pressure level); the optimizer is
+  rebuilt because stale Adam moments would re-poison the restored weights; miner
+  scores survive, so the retry knows which hard negatives caused trouble. The
+  run also keeps a <code>snapshots/</code> archive of the top-K cycle-best
+  checkpoints, each carrying its own thresholds. In smart mode
+  <code>--patience</code> counts <em>cycles</em> without overall improvement, not
+  epochs (deliberate post-raise dips would trip epoch-level patience).</p>
+
+  <div class="arg" id="t-smart">
+    <div class="arg-head"><span class="flag">--smart</span><span class="badge">switch</span><span class="badge">default: off</span></div>
+    <p>Enable the controller. Pressure starts at 0 (gentlest settings); the
+    first cycle that meets the recall target creates the first milestone and
+    begins raising.</p>
+  </div>
+
+  <div class="arg" id="t-lr-cycle-epochs">
+    <div class="arg-head"><span class="flag">--lr-cycle-epochs</span><span class="badge">int</span><span class="badge">default: 10</span></div>
+    <p>Epochs per LR cycle. Shorter cycles react faster but judge each pressure
+    level on less evidence; longer cycles are steadier but slower to adapt.
+    The decision cadence and the snapshot cadence are both tied to this.</p>
+  </div>
+
+  <div class="arg" id="t-lr-min">
+    <div class="arg-head"><span class="flag">--lr-min</span><span class="badge">float</span><span class="badge">default: --lr / 25</span></div>
+    <p>Trough learning rate. The half-cosine reaches it on the cycle's last
+    epoch — the epoch whose settled state the boundary decision judges.</p>
+  </div>
+
+  <div class="arg" id="t-pressure-step">
+    <div class="arg-head"><span class="flag">--pressure-step</span><span class="badge">float</span><span class="badge">default: 0.25</span></div>
+    <p>Initial pressure increment per successful cycle (4 clean cycles to full
+    pressure at the default). Each rewind halves the working step, so failed
+    raises turn into a bisection search for the highest sustainable pressure.</p>
+  </div>
+
+  <div class="arg" id="t-max-rewinds">
+    <div class="arg-head"><span class="flag">--max-rewinds</span><span class="badge">int</span><span class="badge">default: 3</span></div>
+    <p>Failures tolerated at one pressure level before the controller stops
+    pushing: pressure returns to the last stable level and stays there
+    (<code>ceiling</code> event). The run continues — best.pt still improves —
+    matching the pipeline's always-produce-an-honest-model philosophy.</p>
+  </div>
+
+  <div class="arg" id="t-keep-top-k">
+    <div class="arg-head"><span class="flag">--keep-top-k</span><span class="badge">int</span><span class="badge">default: 3</span></div>
+    <p>Size of the <code>snapshots/</code> archive: the K best cycle checkpoints
+    of the run by selection key, for later comparison or ensembling. Worst is
+    evicted (and its file deleted) when a better cycle finishes.</p>
+  </div>
+
   <h3>Hard-negative mining</h3>
   <p class="syn">When the imbalance cap forces subsampling, mining decides which hard
   negatives fill the budget. Each hard negative carries an EMA of its focal loss
@@ -846,7 +914,10 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     <tr><td>hn_alpha</td><td>focal alpha of the HN class in effect this epoch (ramp-aware)</td></tr>
     <tr><td>imbalance_ratio</td><td>ratio in effect this epoch (ramp-aware)</td></tr>
     <tr><td>ramp_progress</td><td>ramp steps completed (0…<code>--ramp-epochs</code>)</td></tr>
-    <tr><td>lr</td><td>learning rate (constant)</td></tr>
+    <tr><td>pressure</td><td>smart mode: pressure level trained at this epoch (blank otherwise)</td></tr>
+    <tr><td>cycle</td><td>smart mode: LR-cycle index (blank otherwise)</td></tr>
+    <tr><td>event</td><td>smart mode, boundary epochs only: raise / hold / rewind / ceiling</td></tr>
+    <tr><td>lr</td><td>learning rate actually used this epoch (cosine-cycled in smart mode)</td></tr>
     <tr><td>epoch_time_s</td><td>wall-clock seconds for train + validate</td></tr>
   </table></div>
 
@@ -862,6 +933,14 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     <tr><td>predicted_n</td><td>validation samples argmax-assigned to this class</td></tr>
     <tr><td>fallback</td><td>per-class mode: 1 if the class used the global fallback threshold; blank in global mode</td></tr>
   </table></div>
+
+  <h3>Smart-mode files</h3>
+  <p>Alongside <code>last.pt</code> / <code>best.pt</code>, a smart run maintains
+  <code>cycle_best.pt</code> (best epoch of the current cycle),
+  <code>milestone.pt</code> (last checkpoint stable at its pressure level — the
+  rewind target), and <code>snapshots/</code> (top-K cycle checkpoints of the
+  run). Checkpoints additionally store the full controller state, so
+  <code>--resume</code> continues the controller mid-flight.</p>
 
   <h3>What a checkpoint contains</h3>
   <p>Both <code>last.pt</code> and <code>best.pt</code> store: model weights, optimizer
