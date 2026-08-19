@@ -122,6 +122,19 @@ def main(argv=None) -> None:
         lines.append(f"  {classes[c]:<20s} {r:.4f}  thr {thr_c:.4f}   "
                      f"(n={int((labels == c).sum())}){note}")
 
+    # A class still boosted at the checkpoint never stabilized on its own —
+    # the reweighting has hit its limit; that class likely needs more data.
+    # (The state is a snapshot at save time: best.pt shows rescue as of its
+    # epoch, last.pt as of the end of training.)
+    cs = ckpt.get("controller_state") or {}
+    r_alphas = cs.get("rescue_alphas") or {}
+    r_repeats = cs.get("rescue_repeats") or {}
+    if r_alphas or r_repeats:
+        parts = [f"{classes[c]} (alpha {r_alphas.get(c, 1.0):.2f}, "
+                 f"repeat {r_repeats.get(c, 1)})"
+                 for c in sorted(set(r_alphas) | set(r_repeats))]
+        lines.append("under rescue at this checkpoint: " + "; ".join(parts))
+
     try:
         fpr, tpr, auc = genuine_vs_hn_roc(probs, labels, hn_index)
         lines.append(f"genuine-vs-HN AUROC            : {auc:.4f}")

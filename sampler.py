@@ -83,6 +83,7 @@ class ImbalanceCapSampler(Sampler[int]):
         if not 0.0 <= random_frac <= 1.0:
             raise ValueError(f"random_frac must be in [0, 1], got {random_frac}")
 
+        self.labels = np.asarray(labels)
         self.genuine_pos = np.flatnonzero(labels != hard_negative_index)
         self.hn_pos = np.flatnonzero(labels == hard_negative_index)
         if len(self.genuine_pos) == 0:
@@ -93,6 +94,7 @@ class ImbalanceCapSampler(Sampler[int]):
         self.random_frac = random_frac
         self.seed = seed
         self.epoch = 0
+        self.genuine_repeats: dict[int, int] = {}
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
@@ -102,6 +104,24 @@ class ImbalanceCapSampler(Sampler[int]):
         if ratio < 1:
             raise ValueError(f"imbalance ratio must be >= 1, got {ratio}")
         self.ratio = ratio
+
+    def set_genuine_repeats(self, repeats: dict[int, int] | None) -> None:
+        """Rescue hook: per-class oversampling for genuine classes. A class
+        with repeat r appears r times per epoch (its samples are duplicated,
+        not resampled). The hard-negative budget stays keyed to the UNIQUE
+        genuine count, so oversampling never inflates hard-negative volume."""
+        repeats = {c: int(r) for c, r in (repeats or {}).items() if int(r) > 1}
+        for r in repeats.values():
+            if r < 1:
+                raise ValueError("repeat factors must be >= 1")
+        self.genuine_repeats = repeats
+
+    def _genuine_epoch_positions(self) -> np.ndarray:
+        parts = [self.genuine_pos]
+        for c, r in sorted(self.genuine_repeats.items()):
+            pos_c = self.genuine_pos[self.labels[self.genuine_pos] == c]
+            parts.extend([pos_c] * (r - 1))
+        return np.concatenate(parts) if len(parts) > 1 else self.genuine_pos
 
     @property
     def hn_budget(self) -> int:
@@ -136,9 +156,9 @@ class ImbalanceCapSampler(Sampler[int]):
         gen.manual_seed(self.seed * 100_003 + self.epoch)
 
         chosen_hn = self._select_hard_negatives(gen)
-        epoch_pos = np.concatenate([self.genuine_pos, chosen_hn])
+        epoch_pos = np.concatenate([self._genuine_epoch_positions(), chosen_hn])
         shuffle = torch.randperm(len(epoch_pos), generator=gen).numpy()
         return iter(epoch_pos[shuffle].tolist())
 
     def __len__(self) -> int:
-        return len(self.genuine_pos) + self.hn_budget
+        return len(self._genuine_epoch_positions()) + self.hn_budget

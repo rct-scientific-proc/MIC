@@ -96,8 +96,9 @@ def main() -> None:
     # target is reachable and raise/milestone events actually fire
     out_sm = OUT_ROOT / "run_smart"
     run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
-        "--batch-size", "32", "--target-recall", "0.9",
+        "--batch-size", "32", "--target-recall", "0.95",
         "--smart", "--lr-cycle-epochs", "3", "--pressure-step", "0.5",
+        "--rescue", "--rescue-ema", "0.3",
         "--imbalance-ratio", "3.0", "--imbalance-ratio-start", "1.0",
         "--hn-alpha", "0.25", "--hn-alpha-end", "1.0",
         "--out-dir", out_sm, "--patience", "0", "--seed", "1",
@@ -109,6 +110,11 @@ def main() -> None:
               if r["event"]]
     assert events, "smart run produced no cycle-boundary events"
     print("smart events:", events)
+    class_rows = list(csv.DictReader(open(out_sm / "class_thresholds.csv")))
+    assert {"alpha", "repeat"} <= set(class_rows[0]), "missing rescue columns"
+    boosts = sorted({(r["class"], r["alpha"], r["repeat"]) for r in class_rows
+                     if float(r["alpha"]) > 1.0 or int(r["repeat"]) > 1})
+    print("rescue boosts seen:", boosts or "none (all classes at target)")
 
     run(REPO / "evaluate.py", out_sm / "best.pt", h5, "--out-dir", out_sm / "eval", *GPU)
     assert (out_sm / "eval" / "report.txt").exists()

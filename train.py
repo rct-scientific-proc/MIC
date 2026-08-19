@@ -45,7 +45,7 @@ CSV_FIELDS = [
     "event", "lr", "epoch_time_s",
 ]
 CLASS_CSV_FIELDS = ["epoch", "class", "threshold", "recall", "predicted_n",
-                    "fallback"]
+                    "fallback", "alpha", "repeat"]
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -97,6 +97,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     o.add_argument("--per-class-min-count", type=int, default=20,
                    help="per-class mode: classes with fewer predicted validation "
                         "samples than this fall back to the global threshold")
+    o.add_argument("--class-alpha", action="append", metavar="NAME=VALUE",
+                   default=None,
+                   help="manual focal alpha for a genuine class, e.g. "
+                        "--class-alpha band3=2.0 (repeatable; works in any "
+                        "mode; rescue boosts apply on top as max(manual, boost))")
     o.add_argument("--imbalance-ratio", type=float, default=math.inf,
                    help="max hard negatives per epoch = ratio * genuine count (1..inf)")
     o.add_argument("--focal-gamma", type=float, default=2.0)
@@ -138,6 +143,19 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "as the run's ceiling")
     s.add_argument("--keep-top-k", type=int, default=3,
                    help="snapshots/ archive size (best cycle checkpoints)")
+    s.add_argument("--rescue", action="store_true",
+                   help="class rescue: at each cycle trough, boost the loss "
+                        "weight and sampling of genuine classes lagging the "
+                        "recall target (smart mode only); pressure raises are "
+                        "blocked while any class is under rescue")
+    s.add_argument("--rescue-alpha-max", type=float, default=3.0,
+                   help="cap on a rescued class's focal alpha (scales with "
+                        "its recall deficit)")
+    s.add_argument("--rescue-oversample-max", type=int, default=3,
+                   help="cap on a rescued class's per-epoch repeat factor")
+    s.add_argument("--rescue-ema", type=float, default=0.5,
+                   help="EMA smoothing of per-class recall across troughs "
+                        "(0 = react to the latest trough only)")
 
     mi = p.add_argument_group("hard-negative mining")
     mi.add_argument("--no-mining", action="store_true",
@@ -153,9 +171,30 @@ def parse_args(argv=None) -> argparse.Namespace:
     if args.smart and args.ramp_epochs > 0:
         p.error("--smart and --ramp-epochs are mutually exclusive (smart mode "
                 "replaces the fixed ramp)")
+    if args.rescue and not args.smart:
+        p.error("--rescue requires --smart (rescue decisions run at cycle "
+                "troughs)")
     if args.lr_min is None:
         args.lr_min = args.lr / 25
     return args
+
+
+def parse_class_alphas(pairs, classes, hn_index) -> dict[int, float]:
+    """--class-alpha NAME=VALUE entries -> {class_index: alpha}."""
+    out: dict[int, float] = {}
+    for pair in pairs or []:
+        name, _, value = pair.partition("=")
+        if not value:
+            raise SystemExit(f"--class-alpha expects NAME=VALUE, got '{pair}'")
+        if name not in classes:
+            raise SystemExit(f"--class-alpha: unknown class '{name}' "
+                             f"(classes: {', '.join(classes)})")
+        idx = classes.index(name)
+        if idx == hn_index:
+            raise SystemExit("--class-alpha cannot target hard_negative; "
+                             "use --hn-alpha")
+        out[idx] = float(value)
+    return out
 
 
 def seed_everything(seed: int) -> None:
@@ -323,12 +362,21 @@ def main(argv=None) -> None:
                                   weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
 
+    base_alphas = parse_class_alphas(args.class_alpha, classes, hn_index)
+    if base_alphas:
+        criterion.set_class_alphas(
+            {c: base_alphas.get(c, 1.0) for c in range(len(classes))
+             if c != hn_index})
+
     controller = None
     if args.smart:
         controller = SmartController(
             lr_max=args.lr, lr_min=args.lr_min, cycle_epochs=args.lr_cycle_epochs,
             pressure_step=args.pressure_step, max_rewinds=args.max_rewinds,
-            keep_top_k=args.keep_top_k,
+            keep_top_k=args.keep_top_k, rescue=args.rescue,
+            rescue_alpha_max=args.rescue_alpha_max,
+            rescue_oversample_max=args.rescue_oversample_max,
+            rescue_ema=args.rescue_ema, target_recall=args.target_recall,
         )
 
     start_epoch = 0
@@ -379,10 +427,22 @@ def main(argv=None) -> None:
             for g in optimizer.param_groups:
                 g["lr"] = lr
             p_used, cycle_used = controller.p_try, controller.cycle
+            # Rescue boosts (from the last trough) apply on top of any
+            # manual --class-alpha values; recovered classes fall back.
+            class_alphas = {c: base_alphas.get(c, 1.0)
+                            for c in range(len(classes)) if c != hn_index}
+            for c, a in controller.rescue_alphas.items():
+                class_alphas[c] = max(class_alphas[c], a)
+            criterion.set_class_alphas(class_alphas)
+            repeats_used = dict(controller.rescue_repeats)
+            sampler.set_genuine_repeats(repeats_used)
         else:
             hn_alpha, ratio = ramp_values(args, ramp_progress, n_genuine, n_hn)
             lr = args.lr
             p_used, cycle_used = "", ""
+            class_alphas = {c: base_alphas.get(c, 1.0)
+                            for c in range(len(classes)) if c != hn_index}
+            repeats_used = {}
         criterion.set_hn_alpha(hn_alpha)
         sampler.set_ratio(ratio)
         sampler.set_epoch(epoch)
@@ -433,8 +493,14 @@ def main(argv=None) -> None:
                     0 if improved_this_cycle else controller.cycles_since_best + 1)
                 improved_this_cycle = False
                 boundary_cycle = controller.cycle
-                event = controller.end_cycle(out_dir)
-                if event in ("rewind", "ceiling") and (out_dir / "milestone.pt").exists():
+                base_event = controller.end_cycle(
+                    out_dir, per_class_recall=op["per_class_recall"])
+                rescued = sorted(set(controller.rescue_alphas)
+                                 | set(controller.rescue_repeats))
+                event = base_event
+                if rescued:
+                    event += " rescue:" + ",".join(classes[c] for c in rescued)
+                if base_event in ("rewind", "ceiling") and (out_dir / "milestone.pt").exists():
                     mckpt = torch.load(out_dir / "milestone.pt",
                                        map_location=device, weights_only=False)
                     model.load_state_dict(mckpt["model_state"])
@@ -477,6 +543,8 @@ def main(argv=None) -> None:
                 "recall": f"{r:.6f}",
                 "predicted_n": op["predicted_counts"].get(c, 0),
                 "fallback": int(c in fallback_set) if class_thr else "",
+                "alpha": f"{class_alphas.get(c, 1.0):.3f}",
+                "repeat": repeats_used.get(c, 1),
             })
         class_csv_file.flush()
 

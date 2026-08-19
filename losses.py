@@ -31,6 +31,14 @@ class FocalLoss(nn.Module):
         """Ramp hook: adjust the hard-negative class weight between epochs."""
         self.alpha[self.hard_negative_index] = hn_alpha
 
+    def set_class_alphas(self, alphas: dict[int, float]) -> None:
+        """Rescue hook: set genuine-class weights (the hard_negative entry is
+        owned by set_hn_alpha and ignored here). Pass a complete mapping —
+        classes absent from `alphas` keep their current value."""
+        for c, a in alphas.items():
+            if c != self.hard_negative_index:
+                self.alpha[c] = a
+
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         log_p = F.log_softmax(logits, dim=1)
         log_p_y = log_p.gather(1, targets.unsqueeze(1)).squeeze(1)

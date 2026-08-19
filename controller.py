@@ -23,6 +23,14 @@ Pressure p in [0, 1] maps through the same endpoint flags as the ramp
 
 The controller also keeps a top-K snapshot archive (snapshots/) of the best
 cycle checkpoints across the run, each carrying its own thresholds.
+
+Class rescue (optional): at each trough the per-class validation recalls are
+EMA-smoothed; classes lagging the target by more than a small deadband get a
+loss-weight boost (up to rescue_alpha_max) and an oversampling repeat factor
+(up to rescue_oversample_max) for the next cycle, both scaled by the deficit
+and recomputed statelessly so a recovered class sheds its boost. A cycle
+trained under active rescue never counts as stable enough for a pressure
+raise — pressure and rescue never change in the same step.
 """
 
 from __future__ import annotations
@@ -33,15 +41,35 @@ from pathlib import Path
 
 
 class SmartController:
+    # A class is rescued only when its EMA recall sits below the target by
+    # more than this fraction of the target — keeps hairline deficits from
+    # blocking pressure raises.
+    RESCUE_DEADBAND = 0.02
+
     def __init__(self, lr_max: float, lr_min: float, cycle_epochs: int,
-                 pressure_step: float, max_rewinds: int, keep_top_k: int):
+                 pressure_step: float, max_rewinds: int, keep_top_k: int,
+                 rescue: bool = False, rescue_alpha_max: float = 3.0,
+                 rescue_oversample_max: int = 3, rescue_ema: float = 0.5,
+                 target_recall: float | None = None):
         if cycle_epochs < 1:
             raise ValueError("cycle_epochs must be >= 1")
+        if rescue and target_recall is None:
+            raise ValueError("rescue requires target_recall")
         self.lr_max = lr_max
         self.lr_min = lr_min
         self.cycle_epochs = cycle_epochs
         self.max_rewinds = max_rewinds
         self.keep_top_k = keep_top_k
+
+        self.rescue = rescue
+        self.rescue_alpha_max = rescue_alpha_max
+        self.rescue_oversample_max = rescue_oversample_max
+        self.rescue_ema = rescue_ema
+        self.target_recall = target_recall
+        self.ema_recall: dict[int, float] = {}
+        self.rescue_alphas: dict[int, float] = {}   # boosts for the NEXT cycle
+        self.rescue_repeats: dict[int, int] = {}
+        self.rescue_active = False                  # a class was boosted this cycle
 
         self.step = pressure_step
         self.p_stable = 0.0   # pressure of the current milestone
@@ -79,10 +107,15 @@ class SmartController:
 
     # --- cycle boundary --------------------------------------------------
 
-    def end_cycle(self, out_dir) -> str:
+    def end_cycle(self, out_dir, per_class_recall: dict | None = None) -> str:
         """Decide at the trough; returns the event. Events 'rewind' and
         'ceiling' require the caller to reload milestone.pt into the model
-        and build a fresh optimizer."""
+        and build a fresh optimizer.
+
+        `per_class_recall` (the trough epoch's per-class validation recalls)
+        feeds the rescue logic: lagging classes get loss/exposure boosts for
+        the next cycle, and a cycle trained under active rescue never counts
+        as stable enough for a pressure raise."""
         out_dir = Path(out_dir)
         cb = tuple(self.cycle_best_key) if self.cycle_best_key is not None else None
         met = cb is not None and bool(cb[0])
@@ -92,7 +125,7 @@ class SmartController:
             self.milestone_key = list(cb)
             self.p_stable = self.p_try
             self.rewinds = 0
-            if not self.ceiling and self.p_try < 1.0:
+            if not self.ceiling and self.p_try < 1.0 and not self.rescue_active:
                 self.p_try = min(1.0, self.p_try + self.step)
                 event = "raise"
             else:
@@ -111,10 +144,35 @@ class SmartController:
                 event = "rewind"
 
         self._snapshot(out_dir)
+        if self.rescue and per_class_recall:
+            self._update_rescue(per_class_recall)
         self.cycle += 1
         self.epoch_in_cycle = 0
         self.cycle_best_key = None
         return event
+
+    def _update_rescue(self, per_class_recall: dict) -> None:
+        """EMA the trough recalls, then recompute next cycle's boosts
+        statelessly from the current deficits — a recovered class loses its
+        boost automatically, so there is no see-saw bookkeeping."""
+        for c, r in per_class_recall.items():
+            prev = self.ema_recall.get(c)
+            self.ema_recall[c] = (r if prev is None else
+                                  self.rescue_ema * prev + (1 - self.rescue_ema) * r)
+
+        alphas, repeats = {}, {}
+        for c, ema in self.ema_recall.items():
+            deficit = (self.target_recall - ema) / max(self.target_recall, 1e-9)
+            deficit = min(1.0, deficit)
+            if deficit < self.RESCUE_DEADBAND:
+                continue
+            alphas[c] = 1.0 + (self.rescue_alpha_max - 1.0) * deficit
+            rep = 1 + round((self.rescue_oversample_max - 1) * deficit)
+            if rep > 1:
+                repeats[c] = rep
+        self.rescue_alphas = alphas
+        self.rescue_repeats = repeats
+        self.rescue_active = bool(alphas or repeats)
 
     def _snapshot(self, out_dir: Path) -> None:
         """Keep the top-K cycle-best checkpoints across the run."""
@@ -138,7 +196,10 @@ class SmartController:
     _STATE_FIELDS = ("lr_max", "lr_min", "cycle_epochs", "max_rewinds",
                      "keep_top_k", "step", "p_stable", "p_try", "cycle",
                      "epoch_in_cycle", "rewinds", "ceiling", "milestone_key",
-                     "cycle_best_key", "cycles_since_best", "snapshots")
+                     "cycle_best_key", "cycles_since_best", "snapshots",
+                     "rescue", "rescue_alpha_max", "rescue_oversample_max",
+                     "rescue_ema", "target_recall", "ema_recall",
+                     "rescue_alphas", "rescue_repeats", "rescue_active")
 
     def state_dict(self) -> dict:
         return {f: getattr(self, f) for f in self._STATE_FIELDS}
