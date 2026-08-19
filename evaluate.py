@@ -27,6 +27,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from checkpoints import find_checkpoint
 from dataset import SPLIT_NAMES, SPLIT_TEST, H5SnippetDataset, validate_h5
 from metrics import (apply_threshold, calibration_bins, collect_probs,
                      final_prediction, genuine_vs_hn_roc, per_class_ovr_roc)
@@ -37,7 +38,9 @@ from plots import (plot_calibration, plot_confusion, plot_genuine_vs_hn_roc,
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("checkpoint", help="checkpoint from train.py (best.pt / last.pt)")
+    p.add_argument("checkpoint",
+                   help="checkpoint from train.py: a .pt file, or a run "
+                        "directory (uses its newest best_* checkpoint)")
     p.add_argument("h5", help="dataset .h5 file (h5_format.md)")
     p.add_argument("--split", type=int, default=SPLIT_TEST, choices=sorted(SPLIT_NAMES),
                    help="0 train, 1 validate, 2 test (default: test)")
@@ -61,7 +64,10 @@ def main(argv=None) -> None:
     args = parse_args(argv)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    ckpt_path = find_checkpoint(args.checkpoint, "best")
+    if ckpt_path is None:
+        raise SystemExit(f"no checkpoint found at {args.checkpoint}")
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     classes = ckpt["classes"]
     hn_index = ckpt["hard_negative_index"]
     threshold = ckpt["threshold"]
@@ -73,7 +79,7 @@ def main(argv=None) -> None:
         )
 
     split_name = SPLIT_NAMES[args.split]
-    out_dir = Path(args.out_dir or Path(args.checkpoint).parent / f"eval_{split_name}")
+    out_dir = Path(args.out_dir or ckpt_path.parent / f"eval_{split_name}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     recall_agg = ckpt.get("recall_agg", "macro")
@@ -107,7 +113,7 @@ def main(argv=None) -> None:
 
     fallback_set = set(ckpt.get("val_metrics", {}).get("fallback_classes", []))
     lines = [
-        f"checkpoint : {args.checkpoint} (epoch {ckpt['epoch']}, arch {ckpt['arch']})",
+        f"checkpoint : {ckpt_path} (epoch {ckpt['epoch']}, arch {ckpt['arch']})",
         f"dataset    : {args.h5}  split={split_name}  n={len(ds)}",
         thr_line,
         f"min-threshold floor            : {min_threshold:.4f}",
@@ -172,7 +178,7 @@ def main(argv=None) -> None:
                header=header, comments="")
 
     history_csv = Path(args.history_csv) if args.history_csv else \
-        Path(args.checkpoint).parent / "metrics.csv"
+        ckpt_path.parent / "metrics.csv"
     if history_csv.exists():
         plot_history(history_csv, out_dir / "history.png")
     else:

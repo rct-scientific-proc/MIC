@@ -37,6 +37,13 @@ def run(*argv) -> None:
     subprocess.run(cmd, cwd=REPO, check=True)
 
 
+def ck(run_dir: Path, role: str) -> Path:
+    """The single role checkpoint (metric-stamped filename)."""
+    hits = list(run_dir.glob(f"{role}_*.pt"))
+    assert len(hits) == 1, f"expected one {role} checkpoint in {run_dir}: {hits}"
+    return hits[0]
+
+
 def main() -> None:
     # Fresh output tree each run — a stale metrics.csv or checkpoint would
     # otherwise leak into the new run via CSV append / best-key comparison.
@@ -58,16 +65,18 @@ def main() -> None:
     ]
     # short first leg with multiprocess loading (the Windows-sensitive path)
     run(*common, "--epochs", "3", "--workers", "2")
-    for name in ("last.pt", "best.pt", "metrics.csv", "class_thresholds.csv"):
+    for name in ("metrics.csv", "class_thresholds.csv"):
         assert (out / name).exists(), f"missing {out / name}"
+    print("checkpoints:", ck(out, "best").name, "/", ck(out, "last").name)
 
     # resume and train long enough for BN stats to settle and the model to
     # learn (random init needs ~15 epochs on this data); workers=0 is much
-    # faster at this size
-    run(*common, "--epochs", "40", "--workers", "0",
-        "--resume", out / "last.pt")
+    # faster at this size. Passing the run DIRECTORY exercises checkpoint
+    # discovery (newest last_*).
+    run(*common, "--epochs", "40", "--workers", "0", "--resume", out)
 
-    run(REPO / "evaluate.py", out / "best.pt", h5, "--out-dir", out / "eval", *GPU)
+    # evaluate also accepts the run directory (newest best_*)
+    run(REPO / "evaluate.py", out, h5, "--out-dir", out / "eval", *GPU)
     for name in ("report.txt", "confusion.csv", "confusion.png",
                  "roc_genuine_vs_hn.png", "roc_per_class.png",
                  "calibration.png", "history.png"):
@@ -85,10 +94,10 @@ def main() -> None:
         "--threshold-mode", "per-class", "--per-class-min-count", "5",
         "--min-threshold", "0.05", "--out-dir", out_pc, "--patience", "0",
         "--seed", "1", "--epochs", "43", "--workers", "0", *GPU_TRAIN,
-        "--resume", out / "last.pt")
+        "--resume", out)
     assert (out_pc / "class_thresholds.csv").exists()
 
-    run(REPO / "evaluate.py", out_pc / "best.pt", h5, "--out-dir", out_pc / "eval", *GPU)
+    run(REPO / "evaluate.py", out_pc, h5, "--out-dir", out_pc / "eval", *GPU)
     pc_report = (out_pc / "eval" / "report.txt").read_text(encoding="utf-8")
     assert "per-class" in pc_report, "per-class mode not reflected in report"
     print("\n--- per-class report.txt ---\n" + pc_report)
@@ -104,9 +113,11 @@ def main() -> None:
         "--hn-alpha", "0.25", "--hn-alpha-end", "1.0",
         "--out-dir", out_sm, "--patience", "0", "--seed", "1",
         "--epochs", "52", "--workers", "0", *GPU_TRAIN,
-        "--resume", out / "last.pt")
-    for name in ("best.pt", "last.pt", "cycle_best.pt", "metrics.csv"):
+        "--resume", out)
+    for name in ("cycle_best.pt", "metrics.csv"):
         assert (out_sm / name).exists(), f"missing smart output {name}"
+    ck(out_sm, "best")
+    ck(out_sm, "last")
     events = [r["event"] for r in csv.DictReader(open(out_sm / "metrics.csv"))
               if r["event"]]
     assert events, "smart run produced no cycle-boundary events"
@@ -119,7 +130,7 @@ def main() -> None:
     assert (out_sm / "report.pdf").exists(), "missing smart-run PDF report"
     assert (out_sm / "report_assets" / "timeline.png").exists()
 
-    run(REPO / "evaluate.py", out_sm / "best.pt", h5, "--out-dir", out_sm / "eval", *GPU)
+    run(REPO / "evaluate.py", out_sm, h5, "--out-dir", out_sm / "eval", *GPU)
     assert (out_sm / "eval" / "report.txt").exists()
 
     print(f"\noutputs kept in {OUT_ROOT}")

@@ -186,7 +186,9 @@ class SmartController:
                 return
             self.snapshots.remove(worst)
             Path(worst[1]).unlink(missing_ok=True)
-        dst = out_dir / "snapshots" / f"cycle{self.cycle:03d}.pt"
+        spec_txt = f"{key[1]:.4f}" if math.isfinite(key[1]) else "na"
+        dst = (out_dir / "snapshots" /
+               f"cycle{self.cycle:03d}_rec{key[2]:.4f}_spec{spec_txt}.pt")
         dst.parent.mkdir(exist_ok=True)
         shutil.copyfile(src, dst)
         self.snapshots.append([list(key), str(dst)])

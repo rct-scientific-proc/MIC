@@ -30,6 +30,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from checkpoints import checkpoint_name, find_checkpoint, prune_role
 from controller import SmartController
 from dataset import SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset, validate_h5
 from losses import FocalLoss
@@ -84,7 +85,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                          "quietly turning test into a second validation set)")
     rp.add_argument("--report-thumbs", type=int, default=16,
                     help="thumbnails per problem-sample grid in the report")
-    t.add_argument("--resume", default=None, help="checkpoint to resume from")
+    t.add_argument("--resume", default=None,
+                   help="checkpoint to resume from: a .pt file, or a run "
+                        "directory (uses its newest last_* checkpoint)")
 
     o = p.add_argument_group("objective")
     o.add_argument("--target-recall", type=float, default=0.95,
@@ -393,21 +396,25 @@ def main(argv=None) -> None:
     best_key = None
     ramp_progress = 0
     if args.resume:
-        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        resume_path = find_checkpoint(args.resume, "last")
+        if resume_path is None:
+            raise SystemExit(f"--resume: no checkpoint found at {args.resume}")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optimizer_state"])
         scaler.load_state_dict(ckpt["scaler_state"])
         start_epoch = ckpt["epoch"] + 1
-        # best_key describes out_dir/best.pt; when resuming into a fresh
-        # directory that file doesn't exist, so the new run must track its
-        # own best from scratch or it may never write one.
-        best_key = ckpt.get("best_key") if (out_dir / "best.pt").exists() else None
+        # best_key describes this directory's best checkpoint; when resuming
+        # into a fresh directory that file doesn't exist, so the new run must
+        # track its own best from scratch or it may never write one.
+        best_key = (ckpt.get("best_key")
+                    if find_checkpoint(out_dir, "best") is not None else None)
         ramp_progress = ckpt.get("ramp_progress", 0)
         if miner is not None and ckpt.get("miner_state") is not None:
             miner.load_state_dict(ckpt["miner_state"])
         if controller is not None and ckpt.get("controller_state") is not None:
             controller.load_state_dict(ckpt["controller_state"], out_dir=out_dir)
-        print(f"resumed from {args.resume} at epoch {start_epoch}")
+        print(f"resumed from {resume_path} at epoch {start_epoch}")
 
     csv_path = out_dir / "metrics.csv"
     new_csv = not csv_path.exists()
@@ -488,7 +495,9 @@ def main(argv=None) -> None:
         if improved:
             best_key = key
             epochs_since_best = 0
-            save_checkpoint(out_dir / "best.pt", best_key=best_key, **ckpt_kw)
+            best_path = out_dir / checkpoint_name("best", epoch, op)
+            save_checkpoint(best_path, best_key=best_key, **ckpt_kw)
+            prune_role(out_dir, "best", best_path)
         else:
             epochs_since_best += 1
 
@@ -577,14 +586,16 @@ def main(argv=None) -> None:
         if stop:
             print(f"early stop: no improvement for {args.patience} cycles")
 
-        # last.pt carries the post-decision state (post-rewind weights and
-        # controller state), so --resume continues exactly where the
-        # controller left off; its metrics/threshold match its weights.
-        save_checkpoint(out_dir / "last.pt", model=model, optimizer=optimizer,
+        # The last checkpoint carries the post-decision state (post-rewind
+        # weights and controller state), so --resume continues exactly where
+        # the controller left off; its metrics/threshold match its weights.
+        last_path = out_dir / checkpoint_name("last", epoch, op_for_last)
+        save_checkpoint(last_path, model=model, optimizer=optimizer,
                         scaler=scaler, epoch=epoch, args=args, classes=classes,
                         hn_index=hn_index, op=op_for_last, miner=miner,
                         ramp_progress=ramp_progress, controller=controller,
                         best_key=best_key)
+        prune_role(out_dir, "last", last_path)
 
         if stop:
             break
@@ -595,7 +606,7 @@ def main(argv=None) -> None:
     csv_file.close()
     class_csv_file.close()
 
-    if not args.no_report and (out_dir / "best.pt").exists():
+    if not args.no_report and find_checkpoint(out_dir, "best") is not None:
         try:
             from dataset import SPLIT_TEST
             from report import build_report

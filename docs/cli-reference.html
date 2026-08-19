@@ -437,8 +437,9 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
   </div>
 
   <div class="arg" id="t-resume">
-    <div class="arg-head"><span class="flag">--resume</span><span class="badge">path (.pt)</span><span class="badge">default: none</span></div>
-    <p>Continue from a checkpoint (normally <code>last.pt</code>). Restores model
+    <div class="arg-head"><span class="flag">--resume</span><span class="badge">path (.pt or run dir)</span><span class="badge">default: none</span></div>
+    <p>Continue from a checkpoint — an explicit .pt file, or a run directory
+    (resolves its newest <code>last_*</code> checkpoint). Restores model
     weights, optimizer state, AMP scaler, the epoch counter, the best-so-far
     selection key, the hard-negative miner's error scores, and ramp progress —
     the run picks up as if uninterrupted. Point <code>--out-dir</code> at the same
@@ -840,8 +841,9 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   global fallback.</p>
 
   <div class="arg" id="e-checkpoint">
-    <div class="arg-head"><span class="flag">checkpoint</span><span class="badge">positional · path</span><span class="badge">required</span></div>
-    <p><code>best.pt</code> or <code>last.pt</code> from a training run. The checkpoint
+    <div class="arg-head"><span class="flag">checkpoint</span><span class="badge">positional · .pt or run dir</span><span class="badge">required</span></div>
+    <p>A checkpoint file from a training run, or the run directory itself
+    (resolves its newest <code>best_*</code> checkpoint). The checkpoint
     supplies the architecture, class list, normalization flag, and threshold —
     you cannot pass a mismatched <code>--arch</code> by accident because there is no
     such flag here. The class list is cross-checked against the dataset and a
@@ -1031,6 +1033,22 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
     <tr><td>alpha</td><td>focal alpha in effect for this class this epoch (manual --class-alpha and/or rescue boost; 1.0 = unweighted)</td></tr>
     <tr><td>repeat</td><td>per-epoch oversampling factor in effect (rescue; 1 = no oversampling)</td></tr>
   </table></div>
+
+  <h3>Checkpoint filenames</h3>
+  <p>The best and last checkpoints carry their role, epoch, headline metrics,
+  and a UTC timestamp in the filename:</p>
+  <div class="formula">best_e0041_rec0.9211_spec1.0000_20260819T153042Z.pt
+last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
+  <p>Exactly one file per role is kept — each save writes the new file and
+  prunes the previous one (including legacy fixed-name <code>best.pt</code> /
+  <code>last.pt</code> from older runs, which remain loadable until then).
+  Because names vary, <code>--resume</code> and <code>evaluate.py</code> /
+  <code>report.py</code> accept a <em>run directory</em> and resolve the newest
+  checkpoint of the right role (last for resume, best for evaluation) — or an
+  explicit .pt path as before. Smart-mode snapshots are also metric-stamped
+  (<code>snapshots/cycle003_rec0.9520_spec1.0000.pt</code>); the
+  controller-internal <code>cycle_best.pt</code> / <code>milestone.pt</code> keep
+  fixed names.</p>
 
   <h3>report.pdf &amp; report_assets/</h3>
   <p>Unless <code>--no-report</code> is set, every run ends with
