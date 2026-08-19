@@ -775,10 +775,14 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   targets, pressure ceilings, floor binding, fallback classes, high ECE — each
   with its recommended action), dataset and configuration tables, the training
   history and controller-timeline charts, a fresh inference pass at the stored
-  operating point (per-class table, ROC, calibration, confusion), and thumbnail
-  grids of the actual problem samples: the hardest genuine samples, the
-  most-fooling hard negatives, and the miner's persistently-hard training
-  negatives. Regenerate for any past run with
+  operating point (per-class table, ROC, calibration, confusion), and
+  <strong>one thumbnail page per genuine class</strong>: its best predictions
+  (highest-confidence correct), its worst (missed/misclassified first, lowest
+  scores), and its impostors — samples of other labels the model routes to
+  this class, with the ones crossing its threshold flagged ACCEPTED. A final
+  page shows the miner's persistently-hard training negatives. With more than
+  12 classes, pages cover the worst-recall 12 and the omission is stated.
+  Regenerate for any past run with
   <code>python report.py &lt;run_dir&gt; &lt;data.h5&gt;</code>.</p>
 
   <div class="arg" id="t-no-report">
@@ -798,9 +802,11 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
 
   <div class="arg" id="t-report-thumbs">
     <div class="arg-head"><span class="flag">--report-thumbs</span><span class="badge">int</span><span class="badge">default: 16</span></div>
-    <p>Thumbnails per problem-sample grid (hardest genuine / most-fooling hard
-    negatives / miner's hardest). Raw dataset images, captioned with true →
-    predicted class and genuineness score.</p>
+    <p>Thumbnail budget for the sample grids. Per class page: the best-
+    predictions row shows up to min(6, thumbs), the worst and impostor grids up
+    to min(12, thumbs) each; the miner grid uses the full value. Raw dataset
+    images, captioned with predicted/true class, genuineness score, and
+    MISSED/ACCEPTED flags.</p>
   </div>
 
   <h3>Data group</h3>

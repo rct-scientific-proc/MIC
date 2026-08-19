@@ -140,11 +140,19 @@ def _collect_warnings(best: dict, last: dict, rows: list[dict], classes,
     return warnings
 
 
-def _hard_sample_grids(h5_path, split, probs, labels, operating, hn_index,
-                       classes, best, assets: Path, thumbs: int) -> list[tuple]:
-    """Thumbnail grids of the actual problem samples. Returns
-    [(png_path, caption), ...]."""
-    grids: list[tuple] = []
+# at most this many per-class sample pages; worst-recall classes win and the
+# omission is stated in the PDF (never silent)
+MAX_CLASS_PAGES = 12
+
+
+def _class_sample_pages(h5_path, split, probs, labels, operating, hn_index,
+                        classes, res, best, assets: Path, thumbs: int):
+    """One page of thumbnails per genuine class: best predictions, worst
+    predictions, and impostors (samples of OTHER labels the model routes to
+    this class). Returns (pages, omitted_names, miner_grid).
+
+    pages: [{name, stats, grids: [(png_path, note), ...]}, ...]
+    """
     ds = H5SnippetDataset(h5_path, split)
     scores = genuineness_scores(probs, hn_index)
     pred = non_hn_argmax(probs, hn_index)
@@ -154,54 +162,90 @@ def _hard_sample_grids(h5_path, split, probs, labels, operating, hn_index,
         thr_vec = np.array([operating[int(p)] for p in pred])
     else:
         thr_vec = np.full(len(pred), float(operating))
-    recalled = (scores >= thr_vec) & (pred == labels) & genuine
+    accepted = scores >= thr_vec
+    recalled = accepted & (pred == labels) & genuine
 
+    best_n = min(6, thumbs)          # one row: the healthy reference
+    worst_n = imp_n = min(12, thumbs)  # up to two rows: the problems
+
+    class_ids = sorted(res["per_class_recall"],
+                       key=lambda c: res["per_class_recall"][c])
+    omitted = [classes[c] for c in class_ids[MAX_CLASS_PAGES:]]
+    class_ids = class_ids[:MAX_CLASS_PAGES]
+
+    cs_best = best.get("controller_state") or {}
+    rescued = set(cs_best.get("rescue_alphas") or {}) | \
+        set(cs_best.get("rescue_repeats") or {})
+    fb = set((best.get("val_metrics") or {}).get("fallback_classes") or [])
+
+    pages = []
     with h5py.File(h5_path, "r") as f:
         def thumbs_for(positions):
             return [f["images"][int(ds.indices[p])] for p in positions]
 
-        # hardest genuine: not-recalled first (most confidently rejected
-        # first), padded with the lowest-scoring recalled ones
-        gen_pos = np.flatnonzero(genuine)
-        missed = gen_pos[~recalled[gen_pos]]
-        missed = missed[np.argsort(scores[missed])]
-        rest = gen_pos[recalled[gen_pos]]
-        rest = rest[np.argsort(scores[rest])]
-        chosen = np.concatenate([missed, rest])[:thumbs]
-        if len(chosen):
-            caps = [f"{classes[labels[p]]} -> {classes[pred[p]]}\n"
-                    f"s={scores[p]:.3f}" + ("" if recalled[p] else "  MISSED")
-                    for p in chosen]
-            path = assets / "hard_genuine.png"
-            plot_sample_grid(thumbs_for(chosen), caps,
-                             "Hardest genuine samples (lowest scores; MISSED = "
-                             "not recalled at the operating point)", path)
-            grids.append((path,
-                          "What the recall failures actually look like - the "
-                          "candidates for relabeling or collecting more "
-                          "examples like them."))
+        for c in class_ids:
+            name = classes[c]
+            thr_c = operating[c] if isinstance(operating, dict) else float(operating)
+            mine = labels == c
+            grids = []
 
-        # most-fooling hard negatives in this split, by genuineness score
-        hn_pos = np.flatnonzero(~genuine)
-        if len(hn_pos):
-            top = hn_pos[np.argsort(-scores[hn_pos])][:thumbs]
-            caps = [f"-> {classes[pred[p]]}  s={scores[p]:.3f}" for p in top]
-            path = assets / "fooling_hn.png"
-            plot_sample_grid(thumbs_for(top), caps,
-                             f"Most-fooling hard negatives ({SPLIT_NAMES[split]} "
-                             "split, highest genuineness scores)", path)
-            grids.append((path,
-                          "Hard negatives the model most wants to accept - "
-                          "the profile of negatives worth mining more of."))
+            # best: correctly classified, highest scores
+            good = np.flatnonzero(mine & (pred == c))
+            good = good[np.argsort(-scores[good])][:best_n]
+            if len(good):
+                caps = [f"s={scores[p]:.3f}" for p in good]
+                path = assets / f"class_{c}_best.png"
+                plot_sample_grid(thumbs_for(good), caps,
+                                 f"{name} - best predictions", path, ncols=6)
+                grids.append((path, None))
+
+            # worst: not-recalled first (lowest score first), then the
+            # weakest recalled ones
+            missed = np.flatnonzero(mine & ~recalled)
+            missed = missed[np.argsort(scores[missed])]
+            weak = np.flatnonzero(mine & recalled)
+            weak = weak[np.argsort(scores[weak])]
+            worst = np.concatenate([missed, weak])[:worst_n]
+            if len(worst):
+                caps = [f"-> {classes[pred[p]]}  s={scores[p]:.3f}"
+                        + ("" if recalled[p] else "  MISSED") for p in worst]
+                path = assets / f"class_{c}_worst.png"
+                plot_sample_grid(thumbs_for(worst), caps,
+                                 f"{name} - worst predictions (MISSED = not "
+                                 "recalled at the operating point)", path, ncols=6)
+                grids.append((path, "Candidates for relabeling or collecting "
+                                    "more examples like them."))
+
+            # impostors: other labels the model routes to this class, most
+            # confident first; ACCEPTED = they cross this class's threshold
+            imp = np.flatnonzero(~mine & (pred == c))
+            imp = imp[np.argsort(-scores[imp])][:imp_n]
+            if len(imp):
+                caps = [f"true {classes[labels[p]]}  s={scores[p]:.3f}"
+                        + ("  ACCEPTED" if accepted[p] else "") for p in imp]
+                path = assets / f"class_{c}_impostors.png"
+                plot_sample_grid(thumbs_for(imp), caps,
+                                 f"{name} - impostors (other labels predicted "
+                                 "as this class)", path, ncols=6)
+                grids.append((path, "What fools this class - accepted "
+                                    "impostors are its specificity leaks."))
+
+            flags = " ".join(filter(None, ["[fallback]" if c in fb else "",
+                                           "[rescued]" if c in rescued else ""]))
+            stats = (f"recall {res['per_class_recall'][c]:.4f} at threshold "
+                     f"{thr_c:.4f}  |  {int(mine.sum())} {SPLIT_NAMES[split]} "
+                     f"samples, {int((pred == c).sum())} predicted as {name}"
+                     + (f"  {flags}" if flags else ""))
+            pages.append({"name": name, "stats": stats, "grids": grids})
 
         # training-split hard negatives the miner found hardest (EMA loss)
+        miner_grid = None
         ms = best.get("miner_state")
         if ms is not None:
             train_ds = H5SnippetDataset(h5_path, SPLIT_TRAIN)
             m_scores = np.asarray(ms["scores"])
             seen = np.asarray(ms["seen"], dtype=bool)
-            is_hn = train_ds.labels == hn_index
-            cand = np.flatnonzero(is_hn & seen)
+            cand = np.flatnonzero((train_ds.labels == hn_index) & seen)
             if len(cand):
                 top = cand[np.argsort(-m_scores[cand])][:thumbs]
                 caps = [f"EMA loss {m_scores[p]:.2f}" for p in top]
@@ -210,11 +254,10 @@ def _hard_sample_grids(h5_path, split, probs, labels, operating, hn_index,
                 plot_sample_grid(imgs, caps,
                                  "Persistently hard training negatives "
                                  "(miner's EMA loss)", path)
-                grids.append((path,
-                              "The training hard negatives that stayed "
-                              "difficult across epochs, per the mining "
-                              "tracker."))
-    return grids
+                miner_grid = (path, "The training hard negatives that stayed "
+                                    "difficult across epochs, per the mining "
+                                    "tracker.")
+    return pages, omitted, miner_grid
 
 
 # --------------------------------------------------------------------------
@@ -376,8 +419,9 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
                      threshold=None if per_class_mode else best["threshold"])
     charts["confusion"] = assets / "confusion.png"
     plot_confusion(cm, classes, charts["confusion"])
-    grids = _hard_sample_grids(str(h5_path), split, probs, labels, operating,
-                               hn_index, classes, best, assets, thumbs)
+    class_pages, omitted_classes, miner_grid = _class_sample_pages(
+        str(h5_path), split, probs, labels, operating, hn_index, classes, res,
+        best, assets, thumbs)
 
     warnings = _collect_warnings(best, last, rows, classes, cal["ece"])
 
@@ -483,12 +527,23 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
                 f"{Path(p).name} (spec {k[1]:.3f}, recall {k[2]:.3f})"
                 for k, p in snaps))
 
-    if grids:
+    for page in class_pages:
         pdf.add_page()
-        _h1(pdf, "Problem samples")
-        for path, caption in grids:
+        _h1(pdf, f"Class: {page['name']}")
+        _para(pdf, page["stats"])
+        for path, note in page["grids"]:
             _image(pdf, path)
-            _para(pdf, caption, size=8.5)
+            if note:
+                _para(pdf, note, size=8.5)
+    if omitted_classes:
+        _para(pdf, "Per-class sample pages shown for the "
+                   f"{len(class_pages)} worst-recall classes; omitted: "
+                   + ", ".join(omitted_classes))
+    if miner_grid:
+        pdf.add_page()
+        _h1(pdf, "Training hard negatives (miner)")
+        _image(pdf, miner_grid[0])
+        _para(pdf, miner_grid[1], size=8.5)
 
     pdf.add_page()
     _h1(pdf, "Configuration")
