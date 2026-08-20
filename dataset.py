@@ -144,18 +144,21 @@ def build_augmentation(specs) -> tuple[v2.Compose | None, v2.Compose | None]:
             v2.Compose(post) if post else None)
 
 
-def build_transform(imagenet_norm: bool) -> v2.Compose:
+def build_transform(imagenet_norm: bool, resize: bool = True) -> v2.Compose:
     """The model input pipeline: CHW uint8 -> resize 224 -> float [0,1] ->
     optional ImageNet normalization. Shared by training, evaluation, and
-    sliding-window inference so preprocessing can never diverge."""
-    ops = [
-        v2.Resize(
+    sliding-window inference so preprocessing can never diverge.
+
+    resize=False skips the resize op for sources already at model size
+    (e.g. files pre-resized by optimize_h5.py)."""
+    ops = []
+    if resize:
+        ops.append(v2.Resize(
             (RESNET_INPUT_SIZE, RESNET_INPUT_SIZE),
             interpolation=v2.InterpolationMode.BILINEAR,
             antialias=True,
-        ),
-        v2.ToDtype(torch.float32, scale=True),  # uint8 -> [0, 1]
-    ]
+        ))
+    ops.append(v2.ToDtype(torch.float32, scale=True))  # uint8 -> [0, 1]
     if imagenet_norm:
         ops.append(v2.Normalize(IMAGENET_MEAN, IMAGENET_STD))
     return v2.Compose(ops)
@@ -252,6 +255,7 @@ class H5SnippetDataset(Dataset):
             self.gt = f["gt"][:][self.indices].astype(bool)
 
             images = f["images"]
+            src_hw = tuple(images.shape[1:3])
             split_bytes = len(self.indices) * int(np.prod(images.shape[1:]))
             if cache_images == "auto":
                 cache_images = split_bytes <= self.CACHE_BUDGET_BYTES
@@ -266,7 +270,11 @@ class H5SnippetDataset(Dataset):
         self.hard_negative_index = len(self.classes) - 1
         self.num_classes = len(self.classes)
 
-        self.transform = build_transform(imagenet_norm)
+        # sources already at model size (e.g. pre-resized by optimize_h5.py)
+        # skip the redundant resize op
+        self.transform = build_transform(
+            imagenet_norm,
+            resize=src_hw != (RESNET_INPUT_SIZE, RESNET_INPUT_SIZE))
 
     def __len__(self) -> int:
         return len(self.indices)

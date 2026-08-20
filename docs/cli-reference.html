@@ -219,7 +219,7 @@
     <a href="#evaluate">2 · evaluate.py</a>
     <a href="#inference">3 · inference.py</a>
     <a href="#download">4 · download_weights.py</a>
-    <a href="#synth">5 · dataset generators (synthetic &amp; real)</a>
+    <a href="#synth">5 · dataset tooling (generate &amp; optimize)</a>
     <a href="#outputs">6 · Outputs: CSV &amp; checkpoints</a>
     <a href="#recipes">7 · Recipes</a>
   </nav>
@@ -1205,6 +1205,23 @@ policy      autoaugment (ImageNet policy, no params)
   <strong>per-image chunks</strong> so per-sample reads stay fast; files
   generated before that fix stream slowly, but the training-side RAM cache
   (on by default) makes them fast anyway — or simply regenerate.</p>
+
+  <h3>optimize_h5.py — repack &amp; optionally pre-resize any h5</h3>
+  <p class="syn"><code>python optimize_h5.py in.h5 out.h5 [--resize 224]
+  [--compression gzip|lzf|none] [--gzip-level N]</code> — rewrites any h5 in
+  the project layout (whatever wrote it) with <strong>per-image chunks</strong>
+  so shuffled per-sample reads never decompress multi-image slabs; measured
+  <strong>344x</strong> faster random reads on a default-chunked gzip file, with
+  byte-identical pixels and metadata. The output is validated and a
+  before/after size + read-throughput comparison is printed.</p>
+  <p><code>--resize N</code> optionally resizes every image to NxN (batched
+  through the GPU when available). Worthwhile when sources are
+  <em>larger</em> than the target — the file shrinks and training/evaluation
+  skip their resize op for files already at model size. When sources are
+  smaller, pre-resizing inflates the data by the square of the scale factor
+  (32px to 224px is 49x) and can push the file past the training RAM cache;
+  the script warns before doing it — for small sources prefer the RAM cache
+  plus <code>--workers</code>.</p>
 </section>
 
 <section class="tool" id="outputs">

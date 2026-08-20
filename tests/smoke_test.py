@@ -177,6 +177,16 @@ def main() -> None:
     print("inference detections:",
           [(r["class"], r["x"], r["y"]) for r in det])
 
+    # optimize_h5: repack + pre-resize to model size, then train an epoch on
+    # the resized file (exercises the skip-resize dataset path)
+    out_opt = OUT_ROOT / "smoke_opt.h5"
+    run(REPO / "optimize_h5.py", h5, out_opt, "--resize", "224", "--no-progress")
+    run(REPO / "train.py", out_opt, "--arch", "resnet18", "--no-pretrained",
+        "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
+        "--out-dir", OUT_ROOT / "run_opt", "--no-report", "--patience", "0",
+        "--seed", "1", *GPU_TRAIN)
+    assert (OUT_ROOT / "run_opt" / "metrics.csv").exists()
+
     print(f"\noutputs kept in {OUT_ROOT}")
     print("SMOKE TEST PASSED")
 
