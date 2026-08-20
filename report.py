@@ -233,9 +233,13 @@ def _class_sample_pages(h5_path, split, probs, labels, operating, hn_index,
 
             flags = " ".join(filter(None, ["[fallback]" if c in fb else "",
                                            "[rescued]" if c in rescued else ""]))
+            routed = int((pred == c).sum())
+            accepted_n = res["accepted_counts"].get(c, 0)
             stats = (f"recall {res['per_class_recall'][c]:.4f} at threshold "
                      f"{thr_c:.4f}  |  {int(mine.sum())} {SPLIT_NAMES[split]} "
-                     f"samples, {int((pred == c).sum())} predicted as {name}"
+                     f"samples  |  argmax routes {routed} here; {accepted_n} "
+                     f"accepted as {name} (matches the confusion column), "
+                     f"{routed - accepted_n} rejected to hard_negative"
                      + (f"  {flags}" if flags else ""))
             pages.append({"name": name, "stats": stats, "grids": grids})
 

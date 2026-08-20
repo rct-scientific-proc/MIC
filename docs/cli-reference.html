@@ -1055,7 +1055,8 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
     <tr><td>class</td><td>class name</td></tr>
     <tr><td>threshold</td><td>the threshold this class operates at (global value in global mode)</td></tr>
     <tr><td>recall</td><td>this class's validation recall at that threshold</td></tr>
-    <tr><td>predicted_n</td><td>validation samples argmax-assigned to this class</td></tr>
+    <tr><td>predicted_n</td><td>validation samples argmax-ROUTED to this class, before threshold rejection (the per-class sweep's partition size, and what the fallback guard checks)</td></tr>
+    <tr><td>accepted_n</td><td>of those, samples that cross the class's threshold — the final predictions, matching the confusion-matrix column; the rest land on hard_negative</td></tr>
     <tr><td>fallback</td><td>per-class mode: 1 if the class used the global fallback threshold; blank in global mode</td></tr>
     <tr><td>alpha</td><td>focal alpha in effect for this class this epoch (manual --class-alpha and/or rescue boost; 1.0 = unweighted)</td></tr>
     <tr><td>repeat</td><td>per-epoch oversampling factor in effect (rescue; 1 = no oversampling)</td></tr>

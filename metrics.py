@@ -190,6 +190,7 @@ def sweep_threshold(
         per_class = {c: 0.0 for c in class_ids}
         spec = 1.0 if n_hn else float("nan")
 
+    accepted_mask = scores >= threshold
     return {
         "threshold": threshold,
         "target_met": target_met,
@@ -198,8 +199,12 @@ def sweep_threshold(
         "per_class_recall": per_class,
         "specificity": spec,
         "max_recall": float(agg_curve[-1]),
+        # argmax routing (pre-threshold) vs final predictions (post-threshold,
+        # matches the confusion-matrix column)
         "predicted_counts": {int(c): int((pred == c).sum()) for c in
                              range(probs.shape[1]) if c != hn_index},
+        "accepted_counts": {int(c): int((accepted_mask & (pred == c)).sum())
+                            for c in range(probs.shape[1]) if c != hn_index},
         "min_threshold": float(min_threshold),
     }
 
@@ -269,6 +274,7 @@ def sweep_class_thresholds(
         "tpr": res["tpr"],
         "max_recall": global_op["max_recall"],
         "predicted_counts": global_op["predicted_counts"],
+        "accepted_counts": res["accepted_counts"],
         "fallback_classes": sorted(c for c, f in fallback.items() if f),
         "min_threshold": float(min_threshold),
     }
@@ -302,6 +308,10 @@ def apply_threshold(
         "per_class_recall": per_class,
         "specificity": float((~accepted[~genuine]).mean()) if n_hn else float("nan"),
         "tpr": float(accepted[genuine].mean()),  # genuine acceptance rate
+        # final predictions per class (accepted & argmax == c) — matches the
+        # confusion-matrix column; rejected samples land on hard_negative
+        "accepted_counts": {int(c): int((accepted & (pred == c)).sum())
+                            for c in range(probs.shape[1]) if c != hn_index},
     }
 
 

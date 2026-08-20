@@ -66,7 +66,7 @@ CSV_FIELDS = [
     "event", "lr", "epoch_time_s",
 ]
 CLASS_CSV_FIELDS = ["epoch", "class", "threshold", "recall", "predicted_n",
-                    "fallback", "alpha", "repeat"]
+                    "accepted_n", "fallback", "alpha", "repeat"]
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -623,6 +623,7 @@ def main(argv=None) -> None:
                 "threshold": f"{(class_thr or {}).get(c, op['threshold']):.6f}",
                 "recall": f"{r:.6f}",
                 "predicted_n": op["predicted_counts"].get(c, 0),
+                "accepted_n": op.get("accepted_counts", {}).get(c, ""),
                 "fallback": int(c in fallback_set) if class_thr else "",
                 "alpha": f"{class_alphas.get(c, 1.0):.3f}",
                 "repeat": repeats_used.get(c, 1),
