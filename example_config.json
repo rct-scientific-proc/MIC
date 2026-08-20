@@ -1,0 +1,39 @@
+{
+  "h5": "data.h5",
+  "out-dir": "runs/exp1",
+
+  "arch": "resnet18",
+  "weights-path": null,
+  "imagenet-norm": false,
+
+  "batch-size": 64,
+  "lr": 0.0003,
+  "weight-decay": 0.0001,
+  "seed": 0,
+  "workers": 0,
+  "amp": true,
+
+  "target-recall": 0.95,
+  "recall-agg": "harmonic",
+  "min-threshold": 0.1,
+  "threshold-mode": "per-class",
+  "per-class-min-count": 20,
+
+  "focal-gamma": 2.0,
+  "hn-alpha": 0.1,
+  "hn-alpha-end": 1.0,
+  "imbalance-ratio-start": 1.0,
+  "imbalance-ratio": "inf",
+  "mining-random-frac": 0.2,
+
+  "smart": 3,
+  "rescue": true,
+
+  "augment": [
+    "rotation:p=0.6,degrees=10",
+    "gaussianblur",
+    { "name": "erasing", "p": 0.3, "scale": [0.02, 0.1] }
+  ],
+
+  "report-thumbs": 16
+}
