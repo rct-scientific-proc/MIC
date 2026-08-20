@@ -997,7 +997,19 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
 
   <div class="arg" id="i-batch">
     <div class="arg-head"><span class="flag">--batch-size</span><span class="badge">int</span><span class="badge">default: 64</span></div>
-    <p>Windows per forward pass. Pure throughput knob.</p>
+    <p>Windows per forward pass. Pure throughput knob — the whole batch of raw
+    uint8 crops is shipped to the GPU in one pinned transfer and
+    resized/normalized on-device, so larger batches amortize well; raise it
+    until GPU memory objects (256+ is comfortable on 8GB cards at 224px).</p>
+  </div>
+
+  <div class="arg" id="i-no-amp">
+    <div class="arg-head"><span class="flag">--no-amp</span><span class="badge">switch</span><span class="badge">default: off (AMP on for CUDA)</span></div>
+    <p>Disable mixed precision. AMP is on by default on CUDA (roughly 4x
+    end-to-end throughput combined with the batched GPU preprocessing) and
+    produces identical decisions in practice — scores differ from fp32 by
+    ~1e-3, which only matters for a window sitting exactly at a threshold.
+    Pass this for bit-faithful fp32 scoring.</p>
   </div>
 
   <div class="arg" id="i-out-dir">
