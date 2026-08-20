@@ -88,6 +88,16 @@ def main() -> None:
     report = (out / "eval" / "report.txt").read_text(encoding="utf-8")
     print("\n--- report.txt ---\n" + report)
 
+    # the emitted config.json is itself a valid --config: one extra epoch
+    # driven entirely by it (CLI overrides only out-dir/epochs/resume)
+    assert (out / "config.json").exists(), "missing resolved config.json"
+    out_cfg = OUT_ROOT / "run_config"
+    run(REPO / "train.py", "--config", out / "config.json",
+        "--out-dir", out_cfg, "--epochs", "41", "--resume", out,
+        "--no-report")
+    assert (out_cfg / "metrics.csv").exists()
+    assert (out_cfg / "config.json").exists()
+
     # short per-class-threshold leg with a floor, warm-started from the
     # trained weights (resume restores the epoch counter, so extend past it)
     out_pc = OUT_ROOT / "run_per_class"

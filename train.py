@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import random
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -70,9 +72,18 @@ CLASS_CSV_FIELDS = ["epoch", "class", "threshold", "recall", "predicted_n",
                     "accepted_n", "fallback", "alpha", "repeat"]
 
 
-def parse_args(argv=None) -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("h5", help="dataset .h5 file (h5_format.md)")
+    p.add_argument("h5", nargs="?", default=None,
+                   help="dataset .h5 file (h5_format.md); may instead be "
+                        "given in --config as \"h5\"")
+    p.add_argument("--config", default=None, metavar="FILE.json",
+                   help="JSON file of options (keys = long option names, "
+                        "dashes or underscores). Precedence: explicit CLI "
+                        "flags > config file > --smart level presets > "
+                        "defaults. Every run writes its resolved options to "
+                        "<out-dir>/config.json, which is itself a valid "
+                        "--config file")
     p.add_argument("--out-dir", default=None,
                    help="output directory (default: runs/<timestamp>)")
 
@@ -229,7 +240,64 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "perspective, gaussianblur, and sharpness are the "
                         "safe subset there")
 
+    return p
+
+
+def _apply_config(p: argparse.ArgumentParser, args: argparse.Namespace,
+                  argv) -> None:
+    """Overlay config-file values onto `args` for every option the user did
+    NOT pass explicitly on the command line."""
+    try:
+        cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    except OSError as e:
+        p.error(f"--config: cannot read {args.config}: {e}")
+    except json.JSONDecodeError as e:
+        p.error(f"--config: {args.config} is not valid JSON: {e}")
+    if not isinstance(cfg, dict):
+        p.error("--config: top level must be a JSON object")
+
+    # Which dests were explicitly given on the CLI: re-parse with every
+    # default suppressed, so only provided options appear in the namespace.
+    aux = build_parser()
+    for action in aux._actions:
+        if action.dest != "help":
+            action.default = argparse.SUPPRESS
+    explicit = set(vars(aux.parse_args(argv)))
+
+    actions = {a.dest: a for a in p._actions}
+    for key, value in cfg.items():
+        dest = key.replace("-", "_").lstrip("_")
+        if dest == "config":
+            continue  # a config file cannot chain-load another
+        action = actions.get(dest)
+        if action is None or dest == "help":
+            p.error(f"--config: unknown option '{key}'")
+        if dest in explicit:
+            continue  # explicit CLI wins
+        if value is None:
+            continue  # null == not specified; keep the parser default
+        if action.type is not None:
+            if isinstance(value, str):
+                value = action.type(value)
+            elif isinstance(value, list):
+                value = [action.type(v) if isinstance(v, str) else v
+                         for v in value]
+        if action.choices is not None:
+            for v in value if isinstance(value, list) else [value]:
+                if v not in action.choices:
+                    p.error(f"--config: '{key}': {v!r} not in "
+                            f"{sorted(action.choices)}")
+        setattr(args, dest, value)
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    p = build_parser()
     args = p.parse_args(argv)
+    if args.config:
+        _apply_config(p, args, sys.argv[1:] if argv is None else argv)
+    if args.h5 is None:
+        p.error("the dataset .h5 path is required (positional argument or "
+                "\"h5\" in --config)")
     if args.smart and args.ramp_epochs > 0:
         p.error("--smart and --ramp-epochs are mutually exclusive (smart mode "
                 "replaces the fixed ramp)")
@@ -410,6 +478,13 @@ def main(argv=None) -> None:
 
     out_dir = Path(args.out_dir or f"runs/{datetime.now():%Y%m%d_%H%M%S}")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resolved options (CLI + config file + presets applied) — itself a valid
+    # --config file, so any run can be reproduced from its output directory.
+    (out_dir / "config.json").write_text(
+        json.dumps({k: v for k, v in vars(args).items() if k != "config"},
+                   indent=2, default=str),
+        encoding="utf-8")
 
     summary = validate_h5(args.h5)
     classes = summary["classes"]

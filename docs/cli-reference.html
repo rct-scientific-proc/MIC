@@ -295,6 +295,32 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     split 2 is never touched by this script.</p>
   </div>
 
+  <div class="arg" id="t-config">
+    <div class="arg-head"><span class="flag">--config</span><span class="badge">path (.json)</span><span class="badge">default: none</span></div>
+    <p>A JSON file of options — keys are the long option names (dashes or
+    underscores both accepted), including the dataset path as
+    <code>"h5"</code>. Precedence, highest first: <strong>explicit CLI flags &gt;
+    config file &gt; --smart level presets &gt; built-in defaults</strong> — so a
+    config captures an experiment while any flag on the command line still
+    overrides it for one-off variations. Values are type-coerced and validated
+    against each option's choices; unknown keys are an error, and
+    <code>"inf"</code> works for the infinite ratio.</p>
+    <div class="formula">{
+  "h5": "data.h5",
+  "smart": 4,
+  "target-recall": 0.97,
+  "threshold-mode": "per-class",
+  "imbalance-ratio": "inf",
+  "augment": ["rotation", "gaussianblur"],
+  "amp": true
+}</div>
+    <p>Every run also <strong>writes its resolved options</strong> (CLI + config +
+    presets applied) to <code>&lt;out-dir&gt;/config.json</code>, which is itself
+    a valid <code>--config</code> file — any past run can be reproduced or
+    branched with <code>python train.py --config runs/exp1/config.json
+    --out-dir runs/exp2</code>.</p>
+  </div>
+
   <div class="arg" id="t-out-dir">
     <div class="arg-head"><span class="flag">--out-dir</span><span class="badge">path</span><span class="badge">default: runs/&lt;timestamp&gt;</span></div>
     <p>Where checkpoints and <code>metrics.csv</code> land. Reusing a directory appends
