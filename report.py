@@ -28,7 +28,7 @@ import torch
 from fpdf import FPDF
 from torch.utils.data import DataLoader
 
-from checkpoints import find_checkpoint
+from checkpoints import find_checkpoint, utc_stamp
 from dataset import SPLIT_NAMES, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset, validate_h5
 from metrics import (apply_threshold, calibration_bins, collect_probs,
                      final_prediction, genuine_vs_hn_roc, genuineness_scores,
@@ -360,8 +360,19 @@ def _box(pdf, lines, fill, edge, title=None):
 # --------------------------------------------------------------------------
 
 def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
-                 device: str | None = None, progress: bool = True) -> Path:
+                 device: str | None = None, progress: bool = True,
+                 out_dir=None, probs: np.ndarray | None = None,
+                 labels: np.ndarray | None = None) -> Path:
+    """Build report_<UTCstamp>.pdf. Reports accumulate (they are not pruned
+    like checkpoints) — the stamp gives each generation its own file.
+
+    out_dir defaults to run_dir; evaluate.py passes its own output directory.
+    probs/labels, when supplied, skip the inference pass (the caller already
+    ran the model over `split` of `h5_path` with this run's best weights).
+    """
     run_dir = Path(run_dir)
+    out_dir = Path(out_dir) if out_dir is not None else run_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
     best_path = find_checkpoint(run_dir, "best")
@@ -383,13 +394,17 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
     class_rows = _read_csv(run_dir / "class_thresholds.csv")
     summary = validate_h5(str(h5_path))
 
-    # ---- end-of-training inference with the stored operating point --------
-    model = build_model(best["arch"], len(classes), pretrained=False).to(dev)
-    model.load_state_dict(best["model_state"])
-    ds = H5SnippetDataset(str(h5_path), split, imagenet_norm=best["imagenet_norm"])
-    loader = DataLoader(ds, batch_size=64, pin_memory=dev.type == "cuda")
-    probs, labels = collect_probs(model, loader, dev, desc="report inference",
-                                  progress=progress)
+    # ---- inference with the stored operating point (skipped when the
+    # caller already ran it) -------------------------------------------------
+    if probs is None or labels is None:
+        model = build_model(best["arch"], len(classes), pretrained=False).to(dev)
+        model.load_state_dict(best["model_state"])
+        ds = H5SnippetDataset(str(h5_path), split,
+                              imagenet_norm=best["imagenet_norm"])
+        loader = DataLoader(ds, batch_size=64, pin_memory=dev.type == "cuda")
+        probs, labels = collect_probs(model, loader, dev,
+                                      desc="report inference",
+                                      progress=progress)
     res = apply_threshold(probs, labels, hn_index, operating, agg=recall_agg)
     pred = final_prediction(probs, hn_index, operating)
     cm = np.bincount(labels * len(classes) + pred,
@@ -402,7 +417,7 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
         auroc = float("nan")
 
     # ---- assets ------------------------------------------------------------
-    assets = run_dir / "report_assets"
+    assets = out_dir / "report_assets"
     assets.mkdir(exist_ok=True)
     charts: dict[str, Path] = {}
     if rows:
@@ -555,7 +570,7 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
            sorted((k, str(v)) for k, v in config.items()),
            widths=[pdf.epw * 0.4, pdf.epw * 0.6])
 
-    out_path = run_dir / "report.pdf"
+    out_path = out_dir / f"report_{utc_stamp()}.pdf"
     pdf.output(str(out_path))
     return out_path
 

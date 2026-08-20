@@ -23,11 +23,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+def utc_stamp() -> str:
+    """Filename-safe UTC timestamp (no colons, Windows-friendly)."""
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
 def checkpoint_name(role: str, epoch: int, op: dict) -> str:
     spec = op.get("specificity")
     spec_txt = ("nan" if spec is None or math.isnan(spec) else f"{spec:.4f}")
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"{role}_e{epoch:04d}_rec{op['recall']:.4f}_spec{spec_txt}_{stamp}.pt"
+    return f"{role}_e{epoch:04d}_rec{op['recall']:.4f}_spec{spec_txt}_{utc_stamp()}.pt"
 
 
 def find_checkpoint(path, role: str) -> Path | None:

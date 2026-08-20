@@ -13,6 +13,8 @@ Outputs in --out-dir (default: <checkpoint dir>/eval_<split>):
     calibration.png            reliability diagram of the genuineness score
     history.png                metric-vs-epoch curves (when metrics.csv is
                                found next to the checkpoint, or --history-csv)
+    report_<UTCstamp>.pdf      full PDF report for this split (--no-report
+                               to skip); reports accumulate, one per run
 
 Example:
     python evaluate.py runs/exp1/best.pt data.h5
@@ -53,6 +55,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="metrics.csv to plot (default: next to the checkpoint)")
     p.add_argument("--no-progress", action="store_true",
                    help="disable the inference progress bar (for logged runs)")
+    p.add_argument("--no-report", action="store_true",
+                   help="skip the PDF report for this evaluation")
+    p.add_argument("--report-thumbs", type=int, default=16,
+                   help="thumbnails per problem-sample grid in the report")
     return p.parse_args(argv)
 
 
@@ -187,6 +193,24 @@ def main(argv=None) -> None:
     report = "\n".join(lines)
     (out_dir / "report.txt").write_text(report, encoding="utf-8")
     print(report)
+
+    if not args.no_report:
+        try:  # a report failure must not eat the evaluation outputs above
+            from report import build_report
+            # The report always describes the run's BEST checkpoint; reuse
+            # this evaluation's inference only when that is what we just ran.
+            is_best = find_checkpoint(ckpt_path.parent, "best") == ckpt_path
+            pdf_path = build_report(
+                ckpt_path.parent, args.h5, split=args.split,
+                thumbs=args.report_thumbs, device=str(device),
+                progress=not args.no_progress, out_dir=out_dir,
+                probs=probs if is_best else None,
+                labels=labels if is_best else None)
+            print(f"\nreport: {pdf_path}")
+        except Exception as e:
+            print(f"\nreport generation failed (evaluation outputs "
+                  f"unaffected): {e}")
+
     print(f"\noutputs written to {out_dir}")
 
 

@@ -770,8 +770,10 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   </div>
 
   <h3>Report group</h3>
-  <p class="syn">Every run ends with a PDF report (<code>report.pdf</code> in the
-  output directory): run identity and reconstructed command, a verdict box, an
+  <p class="syn">Every run ends with a PDF report
+  (<code>report_&lt;UTCstamp&gt;.pdf</code> in the output directory — timestamped
+  filenames, so reports accumulate as history rather than overwriting):
+  run identity and reconstructed command, a verdict box, an
   auto-generated warnings section (classes still under rescue, unreachable
   targets, pressure ceilings, floor binding, fallback classes, high ECE — each
   with its recommended action), dataset and configuration tables, the training
@@ -891,10 +893,14 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
     <div class="arg-head"><span class="flag">--out-dir</span><span class="badge">path</span><span class="badge">default: &lt;ckpt dir&gt;/eval_&lt;split&gt;</span></div>
     <p>Destination for <code>report.txt</code>, <code>confusion.csv</code> /
     <code>confusion.png</code>, <code>roc_genuine_vs_hn.png</code> (operating point
-    marked), <code>roc_per_class.png</code>, <code>calibration.png</code>, and
-    <code>history.png</code>. With more than 8 genuine classes the per-class ROC
-    keeps the worst-AUC classes and the report lists which were omitted — nothing
-    is dropped silently.</p>
+    marked), <code>roc_per_class.png</code>, <code>calibration.png</code>,
+    <code>history.png</code>, and a full <code>report_&lt;UTCstamp&gt;.pdf</code>
+    for the evaluated split (<code>--no-report</code> skips it,
+    <code>--report-thumbs</code> sizes its grids; the inference already computed
+    for the evaluation is reused when the evaluated checkpoint is the run's
+    best). With more than 8 genuine classes the per-class ROC keeps the
+    worst-AUC classes and the report lists which were omitted — nothing is
+    dropped silently.</p>
     <p><code>calibration.png</code> is a reliability diagram of the genuineness
     score: samples are binned by predicted <code>s</code>, and each bin's observed
     genuine fraction is plotted against its mean prediction — the diagonal is
@@ -1050,12 +1056,16 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
   controller-internal <code>cycle_best.pt</code> / <code>milestone.pt</code> keep
   fixed names.</p>
 
-  <h3>report.pdf &amp; report_assets/</h3>
-  <p>Unless <code>--no-report</code> is set, every run ends with
-  <code>report.pdf</code> (see the report group under train.py for contents) and
-  <code>report_assets/</code> holding its charts and thumbnail grids as
-  standalone PNGs. <code>python report.py &lt;run_dir&gt; &lt;data.h5&gt;</code>
-  regenerates both for any past run from its checkpoints and CSVs.</p>
+  <h3>report_&lt;UTCstamp&gt;.pdf &amp; report_assets/</h3>
+  <p>Unless <code>--no-report</code> is set, every training run ends with a
+  timestamped <code>report_&lt;UTCstamp&gt;.pdf</code> (see the report group under
+  train.py for contents) and <code>report_assets/</code> holding its charts and
+  thumbnail grids as standalone PNGs. Reports accumulate — each generation is
+  a new file, so a run resumed or re-reported keeps its history (assets are
+  overwritten, but each PDF embeds its own copies). evaluate.py writes its own
+  report into its eval directory, and
+  <code>python report.py &lt;run_dir&gt; &lt;data.h5&gt;</code> regenerates one for
+  any past run from its checkpoints and CSVs.</p>
 
   <h3>Smart-mode files</h3>
   <p>Alongside <code>last.pt</code> / <code>best.pt</code>, a smart run maintains
