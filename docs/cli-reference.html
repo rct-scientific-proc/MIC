@@ -655,49 +655,70 @@ ceiling  &gt; --max-rewinds failures at one level -> accept the stable
   epochs (deliberate post-raise dips would trip epoch-level patience).</p>
 
   <div class="arg" id="t-smart">
-    <div class="arg-head"><span class="flag">--smart</span><span class="badge">switch</span><span class="badge">default: off</span></div>
-    <p>Enable the controller. Pressure starts at 0 (gentlest settings); the
-    first cycle that meets the recall target creates the first milestone and
-    begins raising.</p>
+    <div class="arg-head"><span class="flag">--smart [1-5]</span><span class="badge">effort level</span><span class="badge">default: off · bare = level 3</span></div>
+    <p>Enable the controller at an <strong>effort level</strong> — how much time
+    the run is allowed to spend reaching the goal. Level 1 trains minimally and
+    aggressively; level 5 is a marathon that creeps toward full hard-negative
+    pressure with tiny steps, deep LR anneals, and many retries. Each level
+    presets the parameters below; <strong>any flag you pass explicitly
+    overrides its preset</strong>, and the resolved configuration is printed at
+    startup and stored in the checkpoint config.</p>
+    <div class="table-wrap"><table>
+      <tr><th>level</th><th>epochs</th><th>cycle</th><th>lr trough</th><th>pressure step</th><th>max rewinds</th><th>rescue</th><th>patience (cycles)</th><th>top-K</th></tr>
+      <tr><td>1 fast</td><td>30</td><td>3</td><td>lr/10</td><td>0.50</td><td>1</td><td>off</td><td>3</td><td>2</td></tr>
+      <tr><td>2</td><td>50</td><td>6</td><td>lr/20</td><td>0.35</td><td>2</td><td>off</td><td>4</td><td>3</td></tr>
+      <tr><td>3 balanced</td><td>80</td><td>10</td><td>lr/25</td><td>0.25</td><td>3</td><td>on (ema 0.5)</td><td>5</td><td>3</td></tr>
+      <tr><td>4 thorough</td><td>150</td><td>15</td><td>lr/50</td><td>0.15</td><td>4</td><td>on (ema 0.6)</td><td>8</td><td>5</td></tr>
+      <tr><td>5 marathon</td><td>300</td><td>20</td><td>lr/100</td><td>0.10</td><td>6</td><td>on (ema 0.7)</td><td>12</td><td>8</td></tr>
+    </table></div>
+    <p>Level 5's shape is deliberate: 10 successful cycles to reach full
+    pressure, six bisection retries per level before accepting a ceiling, and
+    heavy rescue smoothing — the configuration for "reach the goal slowly over
+    a long time". Pressure always starts at 0 (gentlest settings); the first
+    cycle that meets the recall target creates the first milestone and begins
+    raising. Pressure <em>endpoints</em> (<code>--imbalance-ratio</code>,
+    <code>--hn-alpha-end</code>, …) stay yours — they are data-dependent and no
+    level touches them.</p>
   </div>
 
   <div class="arg" id="t-lr-cycle-epochs">
-    <div class="arg-head"><span class="flag">--lr-cycle-epochs</span><span class="badge">int</span><span class="badge">default: 10</span></div>
+    <div class="arg-head"><span class="flag">--lr-cycle-epochs</span><span class="badge">int</span><span class="badge">default: per level</span></div>
     <p>Epochs per LR cycle. Shorter cycles react faster but judge each pressure
     level on less evidence; longer cycles are steadier but slower to adapt.
     The decision cadence and the snapshot cadence are both tied to this.</p>
   </div>
 
   <div class="arg" id="t-lr-min">
-    <div class="arg-head"><span class="flag">--lr-min</span><span class="badge">float</span><span class="badge">default: --lr / 25</span></div>
+    <div class="arg-head"><span class="flag">--lr-min</span><span class="badge">float</span><span class="badge">default: per level</span></div>
     <p>Trough learning rate. The half-cosine reaches it on the cycle's last
     epoch — the epoch whose settled state the boundary decision judges.</p>
   </div>
 
   <div class="arg" id="t-pressure-step">
-    <div class="arg-head"><span class="flag">--pressure-step</span><span class="badge">float</span><span class="badge">default: 0.25</span></div>
-    <p>Initial pressure increment per successful cycle (4 clean cycles to full
-    pressure at the default). Each rewind halves the working step, so failed
+    <div class="arg-head"><span class="flag">--pressure-step</span><span class="badge">float</span><span class="badge">default: per level</span></div>
+    <p>Initial pressure increment per successful cycle (at 0.25, four clean
+    cycles reach full pressure). Each rewind halves the working step, so failed
     raises turn into a bisection search for the highest sustainable pressure.</p>
   </div>
 
   <div class="arg" id="t-max-rewinds">
-    <div class="arg-head"><span class="flag">--max-rewinds</span><span class="badge">int</span><span class="badge">default: 3</span></div>
+    <div class="arg-head"><span class="flag">--max-rewinds</span><span class="badge">int</span><span class="badge">default: per level</span></div>
     <p>Failures tolerated at one pressure level before the controller stops
     pushing: pressure returns to the last stable level and stays there
-    (<code>ceiling</code> event). The run continues — best.pt still improves —
-    matching the pipeline's always-produce-an-honest-model philosophy.</p>
+    (<code>ceiling</code> event). The run continues — the best checkpoint still
+    improves — matching the pipeline's always-produce-an-honest-model
+    philosophy.</p>
   </div>
 
   <div class="arg" id="t-keep-top-k">
-    <div class="arg-head"><span class="flag">--keep-top-k</span><span class="badge">int</span><span class="badge">default: 3</span></div>
+    <div class="arg-head"><span class="flag">--keep-top-k</span><span class="badge">int</span><span class="badge">default: per level</span></div>
     <p>Size of the <code>snapshots/</code> archive: the K best cycle checkpoints
     of the run by selection key, for later comparison or ensembling. Worst is
     evicted (and its file deleted) when a better cycle finishes.</p>
   </div>
 
   <div class="arg" id="t-rescue">
-    <div class="arg-head"><span class="flag">--rescue</span><span class="badge">switch · smart mode only</span><span class="badge">default: off</span></div>
+    <div class="arg-head"><span class="flag">--rescue</span><span class="badge">switch · smart mode only</span><span class="badge">default: on at levels 3+</span></div>
     <p><strong>Class rescue</strong>: at each cycle trough, per-class validation
     recalls are EMA-smoothed and any genuine class lagging the recall target by
     more than a small deadband (2% of the target) gets two boosts for the next
@@ -733,7 +754,7 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   </div>
 
   <div class="arg" id="t-rescue-ema">
-    <div class="arg-head"><span class="flag">--rescue-ema</span><span class="badge">float 0–1</span><span class="badge">default: 0.5</span></div>
+    <div class="arg-head"><span class="flag">--rescue-ema</span><span class="badge">float 0–1</span><span class="badge">default: per level</span></div>
     <p>Smoothing of per-class recall across troughs (<code>ema = e·prev +
     (1−e)·now</code>). With ~10 validation samples per class, one trough reading
     moves in 0.1 steps; smoothing keeps rescue from reacting to that noise.

@@ -39,6 +39,26 @@ from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
 from model import ARCHS, build_model
 from sampler import HardNegativeMiner, ImbalanceCapSampler
 
+# --smart level presets: 1 = minimal/fast, 5 = marathon (slowly reach the
+# goal over a long horizon). Explicit flags always override their preset.
+SMART_PRESETS = {
+    1: dict(epochs=30, lr_cycle_epochs=3, lr_min_div=10, pressure_step=0.50,
+            max_rewinds=1, keep_top_k=2, rescue=False, rescue_ema=0.5,
+            patience=3),
+    2: dict(epochs=50, lr_cycle_epochs=6, lr_min_div=20, pressure_step=0.35,
+            max_rewinds=2, keep_top_k=3, rescue=False, rescue_ema=0.5,
+            patience=4),
+    3: dict(epochs=80, lr_cycle_epochs=10, lr_min_div=25, pressure_step=0.25,
+            max_rewinds=3, keep_top_k=3, rescue=True, rescue_ema=0.5,
+            patience=5),
+    4: dict(epochs=150, lr_cycle_epochs=15, lr_min_div=50, pressure_step=0.15,
+            max_rewinds=4, keep_top_k=5, rescue=True, rescue_ema=0.6,
+            patience=8),
+    5: dict(epochs=300, lr_cycle_epochs=20, lr_min_div=100, pressure_step=0.10,
+            max_rewinds=6, keep_top_k=8, rescue=True, rescue_ema=0.7,
+            patience=12),
+}
+
 CSV_FIELDS = [
     "epoch", "train_loss", "threshold", "threshold_mode", "thr_min", "thr_max",
     "target_met", "recall", "recall_agg", "specificity", "max_recall", "auroc",
@@ -63,7 +83,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="local ImageNet .pth (from download_weights.py) for offline use")
 
     t = p.add_argument_group("training")
-    t.add_argument("--epochs", type=int, default=50)
+    t.add_argument("--epochs", type=int, default=None,
+                   help="training epochs (default: 50, or per --smart level)")
     t.add_argument("--batch-size", type=int, default=64)
     t.add_argument("--lr", type=float, default=3e-4)
     t.add_argument("--weight-decay", type=float, default=1e-4)
@@ -71,8 +92,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     t.add_argument("--device", default=None, help="cuda / cpu (default: auto)")
     t.add_argument("--workers", type=int, default=0, help="DataLoader workers")
     t.add_argument("--amp", action="store_true", help="mixed precision (CUDA only)")
-    t.add_argument("--patience", type=int, default=10,
-                   help="early-stop after N epochs without improvement (0 = off)")
+    t.add_argument("--patience", type=int, default=None,
+                   help="early-stop after N epochs (smart mode: N cycles) "
+                        "without improvement; 0 = off (default: 10, or per "
+                        "--smart level)")
     t.add_argument("--no-progress", action="store_true",
                    help="disable per-batch progress bars (for logged runs)")
 
@@ -143,32 +166,46 @@ def parse_args(argv=None) -> argparse.Namespace:
         "ramp flags (--hn-alpha -> --hn-alpha-end, --imbalance-ratio-start -> "
         "--imbalance-ratio). Mutually exclusive with --ramp-epochs.",
     )
-    s.add_argument("--smart", action="store_true",
-                   help="enable the smart controller")
-    s.add_argument("--lr-cycle-epochs", type=int, default=10,
-                   help="epochs per LR cycle; decisions happen at the trough")
+    s.add_argument("--smart", type=int, nargs="?", const=3, default=None,
+                   choices=sorted(SMART_PRESETS),
+                   help="enable the smart controller at an effort level: 1 = "
+                        "minimal/fast (short cycles, aggressive pressure "
+                        "steps, gives up early), 5 = marathon (long settled "
+                        "cycles, tiny pressure steps, deep LR anneals, many "
+                        "retries - slowly reaches the goal over a long "
+                        "horizon). Bare --smart means level 3. Levels preset "
+                        "epochs, cycle length, lr-min, pressure step, "
+                        "rewinds, rescue, patience, and top-k; any flag you "
+                        "pass explicitly overrides its preset")
+    s.add_argument("--lr-cycle-epochs", type=int, default=None,
+                   help="epochs per LR cycle; decisions happen at the trough "
+                        "(default: per --smart level)")
     s.add_argument("--lr-min", type=float, default=None,
-                   help="trough learning rate (default: --lr / 25)")
-    s.add_argument("--pressure-step", type=float, default=0.25,
-                   help="initial pressure increment per successful cycle")
-    s.add_argument("--max-rewinds", type=int, default=3,
+                   help="trough learning rate (default: --lr divided per "
+                        "--smart level: 10/20/25/50/100)")
+    s.add_argument("--pressure-step", type=float, default=None,
+                   help="initial pressure increment per successful cycle "
+                        "(default: per --smart level)")
+    s.add_argument("--max-rewinds", type=int, default=None,
                    help="rewinds at one pressure level before accepting it "
-                        "as the run's ceiling")
-    s.add_argument("--keep-top-k", type=int, default=3,
-                   help="snapshots/ archive size (best cycle checkpoints)")
+                        "as the run's ceiling (default: per --smart level)")
+    s.add_argument("--keep-top-k", type=int, default=None,
+                   help="snapshots/ archive size (default: per --smart level)")
     s.add_argument("--rescue", action="store_true",
                    help="class rescue: at each cycle trough, boost the loss "
                         "weight and sampling of genuine classes lagging the "
                         "recall target (smart mode only); pressure raises are "
-                        "blocked while any class is under rescue")
+                        "blocked while any class is under rescue (enabled "
+                        "automatically at --smart levels 3+)")
     s.add_argument("--rescue-alpha-max", type=float, default=3.0,
                    help="cap on a rescued class's focal alpha (scales with "
                         "its recall deficit)")
     s.add_argument("--rescue-oversample-max", type=int, default=3,
                    help="cap on a rescued class's per-epoch repeat factor")
-    s.add_argument("--rescue-ema", type=float, default=0.5,
-                   help="EMA smoothing of per-class recall across troughs "
-                        "(0 = react to the latest trough only)")
+    s.add_argument("--rescue-ema", type=float, default=None,
+                   help="EMA smoothing of per-class recall across troughs; "
+                        "0 = react to the latest trough only (default: per "
+                        "--smart level)")
 
     mi = p.add_argument_group("hard-negative mining")
     mi.add_argument("--no-mining", action="store_true",
@@ -187,8 +224,27 @@ def parse_args(argv=None) -> argparse.Namespace:
     if args.rescue and not args.smart:
         p.error("--rescue requires --smart (rescue decisions run at cycle "
                 "troughs)")
-    if args.lr_min is None:
-        args.lr_min = args.lr / 25
+
+    # Fill unset (None) values: from the --smart level preset, or from the
+    # base defaults in non-smart mode. Explicit flags always win.
+    if args.smart:
+        preset = SMART_PRESETS[args.smart]
+        for attr in ("epochs", "lr_cycle_epochs", "pressure_step",
+                     "max_rewinds", "keep_top_k", "rescue_ema", "patience"):
+            if getattr(args, attr) is None:
+                setattr(args, attr, preset[attr])
+        if args.lr_min is None:
+            args.lr_min = args.lr / preset["lr_min_div"]
+        if preset["rescue"]:
+            args.rescue = True
+    else:
+        for attr, value in dict(epochs=50, patience=10, lr_cycle_epochs=10,
+                                pressure_step=0.25, max_rewinds=3,
+                                keep_top_k=3, rescue_ema=0.5).items():
+            if getattr(args, attr) is None:
+                setattr(args, attr, value)
+        if args.lr_min is None:
+            args.lr_min = args.lr / 25
     return args
 
 
@@ -383,6 +439,12 @@ def main(argv=None) -> None:
 
     controller = None
     if args.smart:
+        print(f"smart level {args.smart}: epochs {args.epochs}, "
+              f"cycle {args.lr_cycle_epochs}, lr {args.lr:g} -> {args.lr_min:.2e}, "
+              f"pressure step {args.pressure_step}, max rewinds {args.max_rewinds}, "
+              f"rescue {'on' if args.rescue else 'off'}"
+              f"{f' (ema {args.rescue_ema})' if args.rescue else ''}, "
+              f"patience {args.patience} cycles, top-k {args.keep_top_k}")
         controller = SmartController(
             lr_max=args.lr, lr_min=args.lr_min, cycle_epochs=args.lr_cycle_epochs,
             pressure_step=args.pressure_step, max_rewinds=args.max_rewinds,
