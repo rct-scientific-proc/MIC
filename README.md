@@ -131,6 +131,21 @@ Writes `report.txt`, `confusion.csv`/`confusion.png`, `roc_genuine_vs_hn.png`
 (reliability diagram of the genuineness score, with ECE), and `history.png`
 (metric-vs-epoch curves from `metrics.csv`).
 
+## Blind inference (full images)
+
+```
+python inference.py runs/exp1 photo.png scans/ \
+    --window-width 128 --window-height 128 --stride-x 64
+```
+
+Slides sub-windows over whole images (Pillow; row-major, final row/column
+clamped so edges are covered), classifies each window with the checkpoint's
+stored thresholds, and writes `detections.csv` plus a
+`report_<UTCstamp>.pdf` — a summary of all images and an annotated page
+(raw window boxes, colored per class) for each image containing
+non-hard-negative detections. `--grayscale` for models trained on grayscale
+snippets; `--stride-y` defaults to `--stride-x`.
+
 ## Smoke test
 
 ```
