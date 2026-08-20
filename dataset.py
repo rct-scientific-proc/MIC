@@ -28,6 +28,23 @@ SPLIT_NAMES = {SPLIT_TRAIN: "train", SPLIT_VAL: "validate", SPLIT_TEST: "test"}
 HARD_NEGATIVE_NAME = "hard_negative"
 
 
+def build_transform(imagenet_norm: bool) -> v2.Compose:
+    """The model input pipeline: CHW uint8 -> resize 224 -> float [0,1] ->
+    optional ImageNet normalization. Shared by training, evaluation, and
+    sliding-window inference so preprocessing can never diverge."""
+    ops = [
+        v2.Resize(
+            (RESNET_INPUT_SIZE, RESNET_INPUT_SIZE),
+            interpolation=v2.InterpolationMode.BILINEAR,
+            antialias=True,
+        ),
+        v2.ToDtype(torch.float32, scale=True),  # uint8 -> [0, 1]
+    ]
+    if imagenet_norm:
+        ops.append(v2.Normalize(IMAGENET_MEAN, IMAGENET_STD))
+    return v2.Compose(ops)
+
+
 def validate_h5(path: str) -> dict:
     """Sanity-check an h5 file against h5_format.md.
 
@@ -114,17 +131,7 @@ class H5SnippetDataset(Dataset):
         self.hard_negative_index = len(self.classes) - 1
         self.num_classes = len(self.classes)
 
-        ops = [
-            v2.Resize(
-                (RESNET_INPUT_SIZE, RESNET_INPUT_SIZE),
-                interpolation=v2.InterpolationMode.BILINEAR,
-                antialias=True,
-            ),
-            v2.ToDtype(torch.float32, scale=True),  # uint8 -> [0, 1]
-        ]
-        if imagenet_norm:
-            ops.append(v2.Normalize(IMAGENET_MEAN, IMAGENET_STD))
-        self.transform = v2.Compose(ops)
+        self.transform = build_transform(imagenet_norm)
 
     def __len__(self) -> int:
         return len(self.indices)

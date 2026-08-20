@@ -134,6 +134,36 @@ def main() -> None:
     run(REPO / "evaluate.py", out_sm, h5, "--out-dir", out_sm / "eval", *GPU)
     assert (out_sm / "eval" / "report.txt").exists()
 
+    # blind sliding-window inference: composite scene with two planted band
+    # patches on a hard-negative background (brightness values match
+    # make_synthetic_h5's bands)
+    import numpy as np
+    from PIL import Image
+    rng = np.random.default_rng(7)
+
+    def noisy(base, hgt, wid):
+        return (base + rng.integers(-20, 21, (hgt, wid, 3))).clip(0, 255).astype(np.uint8)
+
+    scene = noisy(152, 512, 512)                    # midpoint = hard negative
+    scene[64:192, 64:192] = noisy(30, 128, 128)     # band0
+    scene[250:378, 300:428] = noisy(225, 128, 128)  # band4
+    scenes = OUT_ROOT / "scenes"
+    scenes.mkdir()
+    Image.fromarray(scene).save(scenes / "scene.png")
+    Image.fromarray(noisy(152, 400, 400)).save(scenes / "clean.png")
+
+    out_inf = OUT_ROOT / "inference"
+    run(REPO / "inference.py", out_sm, scenes, "--window-width", "128",
+        "--window-height", "128", "--stride-x", "64", "--out-dir", out_inf, *GPU)
+    det = list(csv.DictReader(open(out_inf / "detections.csv")))
+    assert det, "no detections on the planted scene"
+    assert all("clean.png" not in r["image"] for r in det), \
+        "false positives on the clean scene"
+    assert {r["class"] for r in det} <= {"band0", "band4"}, det
+    assert list(out_inf.glob("report_*.pdf")), "missing inference PDF report"
+    print("inference detections:",
+          [(r["class"], r["x"], r["y"]) for r in det])
+
     print(f"\noutputs kept in {OUT_ROOT}")
     print("SMOKE TEST PASSED")
 

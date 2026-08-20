@@ -217,10 +217,11 @@
     <a href="#concepts">0 · Core concepts</a>
     <a href="#train">1 · train.py</a>
     <a href="#evaluate">2 · evaluate.py</a>
-    <a href="#download">3 · download_weights.py</a>
-    <a href="#synth">4 · tests/make_synthetic_h5.py</a>
-    <a href="#outputs">5 · Outputs: CSV &amp; checkpoints</a>
-    <a href="#recipes">6 · Recipes</a>
+    <a href="#inference">3 · inference.py</a>
+    <a href="#download">4 · download_weights.py</a>
+    <a href="#synth">5 · tests/make_synthetic_h5.py</a>
+    <a href="#outputs">6 · Outputs: CSV &amp; checkpoints</a>
+    <a href="#recipes">7 · Recipes</a>
   </nav>
 </header>
 
@@ -942,8 +943,79 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   </div>
 </section>
 
-<section class="tool" id="download">
+<section class="tool" id="inference">
   <span class="eyebrow">Section 3</span>
+  <h2>inference.py</h2>
+  <p class="syn"><code>python inference.py CHECKPOINT IMAGES... --window-width W
+  --window-height H --stride-x S [options]</code> — blind sliding-window
+  inference over full images. Each image is loaded with Pillow, tiled into
+  sub-windows (row-major traversal), and every window goes through the exact
+  training preprocessing and the checkpoint's <strong>stored</strong> operating
+  thresholds — a window is a detection when accepted as a genuine class.
+  Outputs: <code>detections.csv</code> (every accepted window), a
+  <code>report_&lt;UTCstamp&gt;.pdf</code> with a summary table of all images and
+  one annotated page per image containing detections (raw window boxes,
+  colored per class), and the overlay PNGs in <code>assets/</code>.</p>
+
+  <div class="arg" id="i-checkpoint">
+    <div class="arg-head"><span class="flag">checkpoint</span><span class="badge">positional · .pt or run dir</span><span class="badge">required</span></div>
+    <p>Same resolution as evaluate.py: an explicit file, or a run directory
+    (newest <code>best_*</code>). Architecture, classes, normalization, and
+    thresholds all come from the checkpoint.</p>
+  </div>
+
+  <div class="arg" id="i-images">
+    <div class="arg-head"><span class="flag">images</span><span class="badge">positional · one or more</span><span class="badge">required</span></div>
+    <p>Image files and/or directories (scanned non-recursively for
+    png/jpg/jpeg/bmp/tif/tiff). Loaded whole with Pillow and converted to RGB
+    (or grayscale with <code>--grayscale</code>).</p>
+  </div>
+
+  <div class="arg" id="i-window">
+    <div class="arg-head"><span class="flag">--window-width / --window-height</span><span class="badge">int · required</span></div>
+    <p>Sub-window size in source pixels. Each window is resized to the model's
+    224x224 input, so choose the size that makes a target fill the window the
+    way training snippets did. Windows larger than the image are clamped to
+    the image size.</p>
+  </div>
+
+  <div class="arg" id="i-stride">
+    <div class="arg-head"><span class="flag">--stride-x / --stride-y</span><span class="badge">int</span><span class="badge">stride-y default: = stride-x</span></div>
+    <p>Window step in pixels, row-major (left-to-right, then down). The final
+    row/column is <strong>clamped inward</strong> so the right/bottom edges are
+    always covered — nothing at the border goes unexamined; edge windows just
+    overlap a little more. Smaller strides find off-grid targets at the cost
+    of proportionally more windows (a stride of window/2 evaluates ~4x the
+    non-overlapping count).</p>
+  </div>
+
+  <div class="arg" id="i-grayscale">
+    <div class="arg-head"><span class="flag">--grayscale</span><span class="badge">switch</span><span class="badge">default: off (RGB)</span></div>
+    <p>Convert images to grayscale before windowing (channel-repeated to 3 for
+    the model) — for models trained on grayscale snippets.</p>
+  </div>
+
+  <div class="arg" id="i-batch">
+    <div class="arg-head"><span class="flag">--batch-size</span><span class="badge">int</span><span class="badge">default: 64</span></div>
+    <p>Windows per forward pass. Pure throughput knob.</p>
+  </div>
+
+  <div class="arg" id="i-out-dir">
+    <div class="arg-head"><span class="flag">--out-dir</span><span class="badge">path</span><span class="badge">default: inference_&lt;UTCstamp&gt;/</span></div>
+    <p>Destination for <code>detections.csv</code>, the PDF, and the overlays.
+    <code>--no-report</code> skips the PDF (the CSV is always written);
+    <code>--device</code> / <code>--no-progress</code> behave as everywhere
+    else.</p>
+  </div>
+
+  <div class="note">Overlapping windows are reported raw — one box per accepted
+  window, no merging — so a single object found by several windows shows
+  several boxes. The CSV is the ground truth for post-processing; images with
+  zero detections appear only in the summary table.</div>
+</section>
+
+<section class="tool" id="download">
+  <span class="eyebrow">Section 4</span>
   <h2>download_weights.py</h2>
   <p class="syn"><code>python download_weights.py [options]</code> — pre-fetches the
   ImageNet <code>.pth</code> files on a connected machine so offline boxes can train
@@ -967,7 +1039,7 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
 </section>
 
 <section class="tool" id="synth">
-  <span class="eyebrow">Section 4</span>
+  <span class="eyebrow">Section 5</span>
   <h2>tests/make_synthetic_h5.py</h2>
   <p class="syn"><code>python tests/make_synthetic_h5.py OUT.h5 [options]</code> —
   generates a small learnable dataset in the exact <code>h5_format.md</code> layout.
@@ -1019,7 +1091,7 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
 </section>
 
 <section class="tool" id="outputs">
-  <span class="eyebrow">Section 5</span>
+  <span class="eyebrow">Section 6</span>
   <h2>Outputs: metrics.csv &amp; checkpoint contents</h2>
 
   <h3>metrics.csv columns</h3>
@@ -1108,7 +1180,7 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
 </section>
 
 <section class="tool" id="recipes">
-  <span class="eyebrow">Section 6</span>
+  <span class="eyebrow">Section 7</span>
   <h2>Recipes</h2>
 
   <h3>Standard run on a real dataset</h3>
@@ -1150,6 +1222,7 @@ python evaluate.py runs/exp2/best.pt data.h5 --split 1    # sanity check</code><
   download_weights.py, and tests/make_synthetic_h5.py · h5 layout: h5_format.md
 </footer>
 </main>
+
 
 
 </body>
