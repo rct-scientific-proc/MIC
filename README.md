@@ -43,6 +43,15 @@ Key options (see `python train.py --help` for all):
 - `--recall-agg` — how per-class recalls aggregate for that target
   (`harmonic` default / `macro` / `min`). Example: recalls (1, 1, 1, 1, 0.1)
   give macro 0.82 but harmonic 0.36 — harmonic makes the target honest.
+- `--min-threshold` — a floor no operating threshold may cross; if the target
+  is only reachable beneath it, the run operates at the floor with
+  `target_met=0`.
+- `--threshold-mode per-class` (with `--per-class-min-count`) — one threshold
+  per genuine class, applied by predicted class: easy classes keep high
+  thresholds while hard ones get slack, instead of one global threshold being
+  dragged down by the weakest class. Small/absent classes fall back to the
+  global threshold. Per-class thresholds and per-class recall are logged each
+  epoch to `class_thresholds.csv` (written in both modes).
 - `--imbalance-ratio R` — at most `R x genuine` hard negatives per epoch
   (1..inf). When this forces subsampling, hard negatives are **mined**: a
   per-sample EMA of training error drives the draw, with a
@@ -51,6 +60,28 @@ Key options (see `python train.py --help` for all):
   start recall-focused (few hard negatives, low focal alpha on the HN class)
   and step toward full pressure; progress advances only on epochs whose
   validation meets the recall target.
+- `--smart [1-5]` — adaptive alternative to the fixed ramp: cyclic
+  (half-cosine) learning rate with hard-negative pressure raised/held/
+  rewound at cycle troughs based on validation metrics. The value is an
+  **effort level**: 1 = minimal/fast (30 epochs, short cycles, aggressive
+  pressure steps), 5 = marathon (300 epochs, long cycles, tiny steps, deep
+  LR anneals, many retries — slowly reaches the goal over a long horizon).
+  Bare `--smart` = level 3 (balanced, rescue on). Levels preset epochs,
+  `--lr-cycle-epochs`, `--lr-min`, `--pressure-step`, `--max-rewinds`,
+  rescue, patience, and `--keep-top-k`; any flag passed explicitly
+  overrides its preset, and the resolved config is printed at startup.
+  Rewinds reload the last stable `milestone.pt` with a fresh optimizer; the
+  top-K cycle checkpoints are archived in `snapshots/`. Patience counts
+  cycles, not epochs, in this mode.
+- `--rescue` (smart mode) — class rescue: genuine classes lagging the recall
+  target at a cycle trough get a deficit-scaled focal-alpha boost
+  (`--rescue-alpha-max`) and per-epoch oversampling
+  (`--rescue-oversample-max`), EMA-smoothed across troughs (`--rescue-ema`)
+  and dropped automatically once the class recovers. Pressure raises are
+  blocked while rescue is active; boosts are logged per class in
+  `class_thresholds.csv` and the eval report flags classes still under
+  rescue at the end. `--class-alpha NAME=VALUE` is the manual, any-mode
+  equivalent.
 - `--focal-gamma`, `--hn-alpha` — focal loss shape; genuine classes have
   alpha 1.
 - `--imagenet-norm` — ImageNet mean/std normalization (default: images are
@@ -59,8 +90,22 @@ Key options (see `python train.py --help` for all):
 - `--resume runs/exp1/last.pt` — full resume (optimizer, miner state, ramp
   progress).
 
-Outputs: `last.pt`, `best.pt` (best by *target met → specificity → macro
-recall*), `metrics.csv`. No augmentations are applied by design.
+Outputs: metric-stamped checkpoints — one `best_*` and one `last_*` file,
+named like `best_e0041_rec0.9211_spec1.0000_20260819T153042Z.pt` (role,
+epoch, recall, specificity, UTC time; best is ranked by *target met →
+specificity → recall*; `--resume` and `evaluate.py`/`report.py` accept the
+run directory and resolve the right file) — plus `metrics.csv`,
+`class_thresholds.csv`, and a timestamped `report_<UTCstamp>.pdf` (reports
+accumulate rather than overwrite; `evaluate.py` also writes one for the
+split it evaluates) — an
+end-of-training PDF (verdict, auto-generated warnings with recommended
+actions, training/controller history charts, a fresh inference pass at the
+stored operating point, and a thumbnail page per class: best predictions,
+worst predictions, and impostors — other labels the model routes to that
+class). `--no-report` skips it; `--report-test`
+uses the test split (opt-in, to keep test honest); regenerate for any past
+run with `python report.py <run_dir> <data.h5>`. No augmentations are
+applied by design.
 
 ## Offline pretrained weights
 
