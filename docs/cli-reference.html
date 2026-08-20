@@ -219,7 +219,7 @@
     <a href="#evaluate">2 · evaluate.py</a>
     <a href="#inference">3 · inference.py</a>
     <a href="#download">4 · download_weights.py</a>
-    <a href="#synth">5 · tests/make_synthetic_h5.py</a>
+    <a href="#synth">5 · dataset generators (synthetic &amp; real)</a>
     <a href="#outputs">6 · Outputs: CSV &amp; checkpoints</a>
     <a href="#recipes">7 · Recipes</a>
   </nav>
@@ -1172,6 +1172,23 @@ policy      autoaugment (ImageNet policy, no params)
     <div class="arg-head"><span class="flag">--seed</span><span class="badge">int</span><span class="badge">default: 0</span></div>
     <p>RNG seed for band noise and hard-negative placement; same seed, same file.</p>
   </div>
+
+  <h3>tests/make_real_h5.py — real public datasets</h3>
+  <p class="syn"><code>python tests/make_real_h5.py DATASET OUT.h5 --hn-classes N
+  [options]</code> — downloads a public torchvision dataset
+  (<code>mnist</code> / <code>fashionmnist</code> — 28x28 grayscale;
+  <code>cifar10</code> / <code>cifar100</code> — 32x32 RGB; cached in
+  <code>--data-dir</code> after the first download) and converts it to the
+  project's h5 format. A <strong>random subset of the original classes becomes
+  the hard_negative class</strong>: <code>--hn-classes N</code> picks N at random
+  with <code>--seed</code>, or <code>--hn-names Pullover,Coat</code> names them
+  explicitly; the rest become the genuine classes. The torchvision train split
+  is carved into train/validate (stratified, <code>--val-frac</code>, default
+  0.15); the torchvision test split becomes the test split.
+  <code>--subset-per-class</code> caps samples per original class for quick
+  experiments. The more classes you assign to hard_negative (e.g. cifar100
+  with <code>--hn-classes 80</code>), the closer the file gets to this
+  pipeline's heavy-imbalance regime.</p>
 </section>
 
 <section class="tool" id="outputs">

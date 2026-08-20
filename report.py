@@ -208,8 +208,8 @@ def _class_sample_pages(h5_path, split, probs, labels, operating, hn_index,
             weak = weak[np.argsort(scores[weak])]
             worst = np.concatenate([missed, weak])[:worst_n]
             if len(worst):
-                caps = [f"-> {classes[pred[p]]}  s={scores[p]:.3f}"
-                        + ("" if recalled[p] else "  MISSED") for p in worst]
+                caps = [f"-> {classes[pred[p]]}\ns={scores[p]:.3f}"
+                        + ("" if recalled[p] else " MISSED") for p in worst]
                 path = assets / f"class_{c}_worst.png"
                 plot_sample_grid(thumbs_for(worst), caps,
                                  f"{name} - worst predictions (MISSED = not "
@@ -222,8 +222,8 @@ def _class_sample_pages(h5_path, split, probs, labels, operating, hn_index,
             imp = np.flatnonzero(~mine & (pred == c))
             imp = imp[np.argsort(-scores[imp])][:imp_n]
             if len(imp):
-                caps = [f"true {classes[labels[p]]}  s={scores[p]:.3f}"
-                        + ("  ACCEPTED" if accepted[p] else "") for p in imp]
+                caps = [f"true {classes[labels[p]]}\ns={scores[p]:.3f}"
+                        + (" ACCEPTED" if accepted[p] else "") for p in imp]
                 path = assets / f"class_{c}_impostors.png"
                 plot_sample_grid(thumbs_for(imp), caps,
                                  f"{name} - impostors (other labels predicted "

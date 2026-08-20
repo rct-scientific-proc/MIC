@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 runs/
 pretrained/
+tests/data/
+*.h5
