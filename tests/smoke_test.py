@@ -61,7 +61,9 @@ def main() -> None:
         "--batch-size", "32", "--target-recall", "0.98",
         "--imbalance-ratio", "3.0", "--imbalance-ratio-start", "1.0",
         "--ramp-epochs", "2", "--hn-alpha", "0.25", "--hn-alpha-end", "1.0",
-        "--augment", "rotation", "gaussianblur",  # label-safe for brightness bands
+        # label-safe for brightness bands; parameterized specs + post-resize
+        "--augment", "rotation:p=0.6,degrees=10", "gaussianblur",
+        "erasing:p=0.25,scale=0.02-0.1",
         "--out-dir", out, "--patience", "0", "--seed", "1", *GPU_TRAIN,
     ]
     # short first leg with multiprocess loading (the Windows-sensitive path)

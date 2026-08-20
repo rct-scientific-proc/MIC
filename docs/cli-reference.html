@@ -877,24 +877,42 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   </div>
 
   <div class="arg" id="t-augment">
-    <div class="arg-head"><span class="flag">--augment</span><span class="badge">one or more names</span><span class="badge">default: none</span></div>
-    <p>Training-split augmentations, applied to the raw uint8 snippet before
-    resize/normalize, in the order given. Validation, evaluation, and blind
-    inference are <strong>never</strong> augmented. Catalog (conservative fixed
-    magnitudes, most wrapped in random-apply):</p>
-    <div class="formula">geometric   rotation (±15°, p .5) · perspective (0.3, p .3)
-filtering   gaussianblur (k3, σ 0.1–1.5, p .5) · sharpness (2.0, p .3)
-photometric colorjitter (.2/.2/.2/.05, p .5) · grayscale (p .2) · invert (p .3)
-            posterize (4 bits, p .3) · solarize (thr 128, p .3)
-            autocontrast (p .3) · equalize (p .3)
-policy      autoaugment (ImageNet policy) · randaugment · trivialaugment</div>
+    <div class="arg-head"><span class="flag">--augment</span><span class="badge">one or more specs</span><span class="badge">default: none</span></div>
+    <p>Training-split augmentations, applied in the order given. Validation,
+    evaluation, and blind inference are <strong>never</strong> augmented. Each
+    spec is a catalog name with optional parameters —
+    <code>rotation:p=0.7,degrees=30</code> on the CLI (ranges written
+    <code>lo-hi</code>, e.g. <code>sigma=0.1-2.0</code>), or a JSON object in a
+    <code>--config</code> file:
+    <code>{"name": "erasing", "p": 0.5, "scale": [0.02, 0.2]}</code>. Every
+    entry's <code>p</code> is its apply probability (<code>p=1</code> = always).
+    Unknown names and unknown parameters are hard errors that list the
+    accepted set. Catalog with parameters and their defaults:</p>
+    <div class="formula">geometric   rotation (p .5, degrees 15) · perspective (p .3, distortion .3)
+filtering   gaussianblur (p .5, kernel 3, sigma 0.1-1.5)
+            sharpness (p .3, factor 2.0)
+occlusion   erasing (p .3, scale 0.02-0.15, ratio 0.3-3.3, value 0)
+            = Random Erasing / Cutout: random black rectangle
+photometric colorjitter (p .5, brightness/contrast/saturation .2, hue .05)
+            grayscale (p .2) · invert (p .3) · posterize (p .3, bits 4)
+            solarize (p .3, threshold 128) · autocontrast (p .3)
+            equalize (p .3)
+policy      autoaugment (ImageNet policy, no params)
+            randaugment (num_ops 2, magnitude 9) · trivialaugment</div>
+    <p>All entries run on the raw uint8 snippet <em>before</em> resize —
+    except <code>erasing</code>, which runs <em>after</em> resize/normalize so
+    the erased fraction is consistent at model scale (its <code>value=0</code>
+    is black in the [0,1] pipeline, mean-gray under ImageNet norm). Keep
+    erasing's <code>scale</code> modest: a large erase can delete the very
+    evidence that makes a small snippet its class.</p>
     <div class="callout"><span class="tag">Label preservation</span>
     An augmentation is only valid if the transformed sample still deserves its
     label. The photometric ops alter intensity and color — when classes are
     distinguished by intensity, a jittered/inverted/equalized sample of one
     class can literally become another class (or a hard negative) while
-    keeping its label. For intensity-coded data, the safe subset is rotation,
-    perspective, gaussianblur, and sharpness. The policy-based entries
+    keeping its label. For intensity-coded data, the safer subset is rotation,
+    perspective, gaussianblur, sharpness, and erasing (with modest scale).
+    The policy-based entries
     (autoaugment/randaugment/trivialaugment) were tuned on natural-image
     benchmarks and freely apply the photometric ops — treat them as
     convenient but aggressive, and prefer an explicit list when in doubt.</div>

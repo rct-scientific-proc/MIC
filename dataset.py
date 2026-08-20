@@ -28,46 +28,120 @@ SPLIT_NAMES = {SPLIT_TRAIN: "train", SPLIT_VAL: "validate", SPLIT_TEST: "test"}
 HARD_NEGATIVE_NAME = "hard_negative"
 
 
-# Training-only augmentation catalog (opt-in via --augment). Applied to raw
-# uint8 CHW crops BEFORE resize/normalize; never to validation, evaluation,
-# or inference. Magnitudes are deliberately conservative. CAUTION: the
-# photometric ops (colorjitter, invert, solarize, equalize, autocontrast,
-# posterize, grayscale) alter intensity/color — if your classes are
-# distinguished by intensity, they can destroy the label. The geometric ops
-# (rotation, perspective) and blur/sharpness are safe for intensity-coded
-# classes.
+# Training-only augmentation catalog (opt-in via --augment). Never applied
+# to validation, evaluation, or inference. Every entry is parameterizable:
+# CLI spec "name:key=val,key=val" (ranges as lo-hi, e.g. sigma=0.1-1.5) or a
+# config-JSON object {"name": ..., key: val, ...}. Each factory's keyword
+# defaults ARE the accepted parameters and their conservative defaults; a
+# probability p wraps the transform in random-apply (p=1 applies always).
+# CAUTION: the photometric ops (colorjitter, invert, solarize, equalize,
+# autocontrast, posterize, grayscale) alter intensity/color — if your
+# classes are distinguished by intensity, they can destroy the label. The
+# geometric ops (rotation, perspective), blur/sharpness, and erasing are
+# the safer subset for intensity-coded classes.
+def _maybe(p, transform):
+    return transform if p >= 1 else v2.RandomApply([transform], p=p)
+
+
 AUGMENTATIONS = {
-    "grayscale": lambda: v2.RandomGrayscale(p=0.2),
-    "colorjitter": lambda: v2.RandomApply(
-        [v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05)],
-        p=0.5),
-    "gaussianblur": lambda: v2.RandomApply(
-        [v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.5),
-    "perspective": lambda: v2.RandomPerspective(distortion_scale=0.3, p=0.3),
-    "rotation": lambda: v2.RandomApply([v2.RandomRotation(15)], p=0.5),
-    "invert": lambda: v2.RandomInvert(p=0.3),
-    "posterize": lambda: v2.RandomPosterize(bits=4, p=0.3),
-    "solarize": lambda: v2.RandomSolarize(threshold=128, p=0.3),
-    "sharpness": lambda: v2.RandomAdjustSharpness(sharpness_factor=2.0, p=0.3),
-    "autocontrast": lambda: v2.RandomAutocontrast(p=0.3),
-    "equalize": lambda: v2.RandomEqualize(p=0.3),
+    "grayscale": lambda p=0.2: v2.RandomGrayscale(p=p),
+    "colorjitter": lambda p=0.5, brightness=0.2, contrast=0.2,
+        saturation=0.2, hue=0.05:
+        _maybe(p, v2.ColorJitter(brightness, contrast, saturation, hue)),
+    "gaussianblur": lambda p=0.5, kernel=3, sigma=(0.1, 1.5):
+        _maybe(p, v2.GaussianBlur(int(kernel), sigma)),
+    "perspective": lambda p=0.3, distortion=0.3:
+        v2.RandomPerspective(distortion_scale=distortion, p=p),
+    "rotation": lambda p=0.5, degrees=15:
+        _maybe(p, v2.RandomRotation(degrees)),
+    "invert": lambda p=0.3: v2.RandomInvert(p=p),
+    "posterize": lambda p=0.3, bits=4: v2.RandomPosterize(int(bits), p=p),
+    "solarize": lambda p=0.3, threshold=128:
+        v2.RandomSolarize(threshold, p=p),
+    "sharpness": lambda p=0.3, factor=2.0:
+        v2.RandomAdjustSharpness(factor, p=p),
+    "autocontrast": lambda p=0.3: v2.RandomAutocontrast(p=p),
+    "equalize": lambda p=0.3: v2.RandomEqualize(p=p),
+    # random black rectangle (Cutout / Random Erasing); applied AFTER
+    # resize/normalize so the erased fraction is consistent at model scale
+    "erasing": lambda p=0.3, scale=(0.02, 0.15), ratio=(0.3, 3.3), value=0.0:
+        v2.RandomErasing(p=p, scale=scale, ratio=ratio, value=value),
     # policy-based (tuned on natural-image benchmarks; include the
     # intensity-altering ops above — same caution applies, amplified)
     "autoaugment": lambda: v2.AutoAugment(v2.AutoAugmentPolicy.IMAGENET),
-    "randaugment": lambda: v2.RandAugment(),
+    "randaugment": lambda num_ops=2, magnitude=9:
+        v2.RandAugment(num_ops=int(num_ops), magnitude=int(magnitude)),
     "trivialaugment": lambda: v2.TrivialAugmentWide(),
 }
 
+# entries applied after the resize/normalize transform (float tensors);
+# everything else runs before it, on the raw uint8 crop
+POST_RESIZE = {"erasing"}
 
-def build_augmentation(names) -> v2.Compose | None:
-    """Compose the named catalog entries, in the order given (None if empty)."""
-    if not names:
-        return None
-    unknown = [n for n in names if n not in AUGMENTATIONS]
-    if unknown:
-        raise ValueError(f"unknown augmentation(s) {unknown}; "
+
+def _parse_value(v: str):
+    try:
+        return float(v)
+    except ValueError:
+        pass
+    parts = v.split("-")
+    if len(parts) == 2:
+        try:
+            return (float(parts[0]), float(parts[1]))
+        except ValueError:
+            pass
+    return v  # leave as string; the factory will reject it if invalid
+
+
+def parse_augment_spec(spec) -> tuple[str, dict]:
+    """'name' / 'name:k=v,k=v' / {'name': ..., k: v} -> (name, params)."""
+    if isinstance(spec, dict):
+        params = dict(spec)
+        name = params.pop("name", None)
+        if not name:
+            raise ValueError(f"augmentation object needs a 'name' key: {spec}")
+        return str(name), params
+    text = str(spec)
+    name, _, rest = text.partition(":")
+    params = {}
+    if rest:
+        for pair in rest.split(","):
+            key, sep, value = pair.partition("=")
+            if not sep:
+                raise ValueError(f"augmentation '{text}': expected key=value, "
+                                 f"got '{pair}'")
+            params[key.strip()] = _parse_value(value.strip())
+    return name.strip(), params
+
+
+def _instantiate(name: str, params: dict):
+    factory = AUGMENTATIONS.get(name)
+    if factory is None:
+        raise ValueError(f"unknown augmentation '{name}'; "
                          f"choose from {sorted(AUGMENTATIONS)}")
-    return v2.Compose([AUGMENTATIONS[n]() for n in names])
+    import inspect
+    allowed = set(inspect.signature(factory).parameters)
+    unknown = set(params) - allowed
+    if unknown:
+        raise ValueError(
+            f"augmentation '{name}': unknown parameter(s) {sorted(unknown)}; "
+            f"accepts {sorted(allowed) if allowed else 'no parameters'}")
+    params = {k: tuple(v) if isinstance(v, list) else v
+              for k, v in params.items()}
+    return factory(**params)
+
+
+def build_augmentation(specs) -> tuple[v2.Compose | None, v2.Compose | None]:
+    """(pre_resize, post_resize) pipelines from a list of augmentation specs,
+    each stage preserving the order given; (None, None) if empty."""
+    if not specs:
+        return None, None
+    pre, post = [], []
+    for spec in specs:
+        name, params = parse_augment_spec(spec)
+        (post if name in POST_RESIZE else pre).append(_instantiate(name, params))
+    return (v2.Compose(pre) if pre else None,
+            v2.Compose(post) if post else None)
 
 
 def build_transform(imagenet_norm: bool) -> v2.Compose:
@@ -162,7 +236,7 @@ class H5SnippetDataset(Dataset):
         self.h5_path = h5_path
         self.split = split
         self.imagenet_norm = imagenet_norm
-        self.augment = build_augmentation(augment)
+        self.augment_pre, self.augment_post = build_augmentation(augment)
         self._file: h5py.File | None = None  # opened lazily per worker
 
         with h5py.File(h5_path, "r") as f:
@@ -188,9 +262,11 @@ class H5SnippetDataset(Dataset):
         img = torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1)  # CHW
         if img.shape[0] == 1:
             img = img.expand(3, -1, -1)
-        if self.augment is not None:  # training split only; still uint8 here
-            img = self.augment(img.contiguous())
+        if self.augment_pre is not None:  # training split only; uint8 here
+            img = self.augment_pre(img.contiguous())
         img = self.transform(img)
+        if self.augment_post is not None:  # e.g. erasing, at model scale
+            img = self.augment_post(img)
 
         return img, int(self.labels[i]), i
 

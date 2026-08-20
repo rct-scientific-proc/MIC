@@ -228,17 +228,22 @@ def build_parser() -> argparse.ArgumentParser:
     d = p.add_argument_group("data")
     d.add_argument("--imagenet-norm", action="store_true",
                    help="ImageNet mean/std normalization (default: just /255)")
-    d.add_argument("--augment", nargs="+", choices=sorted(AUGMENTATIONS),
-                   default=None, metavar="NAME",
+    d.add_argument("--augment", nargs="+", default=None,
+                   metavar="NAME[:k=v,...]",
                    help="training-split augmentations, applied in the order "
                         "given (validation/eval/inference are never "
-                        "augmented). Choices: " + ", ".join(sorted(AUGMENTATIONS))
+                        "augmented). Each spec is a name with optional "
+                        "parameters, e.g. rotation:p=0.7,degrees=30 or "
+                        "erasing:p=0.5,scale=0.02-0.2 (ranges as lo-hi); in "
+                        "a --config file, JSON objects like "
+                        "{\"name\": \"erasing\", \"p\": 0.5} also work. "
+                        "Catalog: " + ", ".join(sorted(AUGMENTATIONS))
                         + ". CAUTION: photometric ops (colorjitter, invert, "
                         "solarize, equalize, autocontrast, posterize, "
                         "grayscale) alter intensity and can destroy the label "
                         "when classes are intensity-coded; rotation, "
-                        "perspective, gaussianblur, and sharpness are the "
-                        "safe subset there")
+                        "perspective, gaussianblur, sharpness, and erasing "
+                        "are the safer subset there")
 
     return p
 
@@ -498,7 +503,8 @@ def main(argv=None) -> None:
                                 augment=args.augment)
     val_ds = H5SnippetDataset(args.h5, SPLIT_VAL, imagenet_norm=args.imagenet_norm)
     if args.augment:
-        print("augmentations (train split only):", ", ".join(args.augment))
+        print("augmentations (train split only):",
+              ", ".join(str(a) for a in args.augment))
 
     miner = None if args.no_mining else HardNegativeMiner(train_ds.labels, hn_index)
     n_genuine = int((train_ds.labels != hn_index).sum())
