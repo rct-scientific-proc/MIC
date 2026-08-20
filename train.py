@@ -32,7 +32,8 @@ from tqdm import tqdm
 
 from checkpoints import checkpoint_name, find_checkpoint, prune_role
 from controller import SmartController
-from dataset import SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset, validate_h5
+from dataset import (AUGMENTATIONS, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
+                     validate_h5)
 from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
@@ -216,6 +217,17 @@ def parse_args(argv=None) -> argparse.Namespace:
     d = p.add_argument_group("data")
     d.add_argument("--imagenet-norm", action="store_true",
                    help="ImageNet mean/std normalization (default: just /255)")
+    d.add_argument("--augment", nargs="+", choices=sorted(AUGMENTATIONS),
+                   default=None, metavar="NAME",
+                   help="training-split augmentations, applied in the order "
+                        "given (validation/eval/inference are never "
+                        "augmented). Choices: " + ", ".join(sorted(AUGMENTATIONS))
+                        + ". CAUTION: photometric ops (colorjitter, invert, "
+                        "solarize, equalize, autocontrast, posterize, "
+                        "grayscale) alter intensity and can destroy the label "
+                        "when classes are intensity-coded; rotation, "
+                        "perspective, gaussianblur, and sharpness are the "
+                        "safe subset there")
 
     args = p.parse_args(argv)
     if args.smart and args.ramp_epochs > 0:
@@ -406,8 +418,12 @@ def main(argv=None) -> None:
     for split_name, c in summary["counts"].items():
         print(f"  {split_name}: {c['genuine']} genuine, {c['hard_negative']} hard negatives")
 
-    train_ds = H5SnippetDataset(args.h5, SPLIT_TRAIN, imagenet_norm=args.imagenet_norm)
+    train_ds = H5SnippetDataset(args.h5, SPLIT_TRAIN,
+                                imagenet_norm=args.imagenet_norm,
+                                augment=args.augment)
     val_ds = H5SnippetDataset(args.h5, SPLIT_VAL, imagenet_norm=args.imagenet_norm)
+    if args.augment:
+        print("augmentations (train split only):", ", ".join(args.augment))
 
     miner = None if args.no_mining else HardNegativeMiner(train_ds.labels, hn_index)
     n_genuine = int((train_ds.labels != hn_index).sum())

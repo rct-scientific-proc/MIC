@@ -28,6 +28,48 @@ SPLIT_NAMES = {SPLIT_TRAIN: "train", SPLIT_VAL: "validate", SPLIT_TEST: "test"}
 HARD_NEGATIVE_NAME = "hard_negative"
 
 
+# Training-only augmentation catalog (opt-in via --augment). Applied to raw
+# uint8 CHW crops BEFORE resize/normalize; never to validation, evaluation,
+# or inference. Magnitudes are deliberately conservative. CAUTION: the
+# photometric ops (colorjitter, invert, solarize, equalize, autocontrast,
+# posterize, grayscale) alter intensity/color — if your classes are
+# distinguished by intensity, they can destroy the label. The geometric ops
+# (rotation, perspective) and blur/sharpness are safe for intensity-coded
+# classes.
+AUGMENTATIONS = {
+    "grayscale": lambda: v2.RandomGrayscale(p=0.2),
+    "colorjitter": lambda: v2.RandomApply(
+        [v2.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05)],
+        p=0.5),
+    "gaussianblur": lambda: v2.RandomApply(
+        [v2.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.5),
+    "perspective": lambda: v2.RandomPerspective(distortion_scale=0.3, p=0.3),
+    "rotation": lambda: v2.RandomApply([v2.RandomRotation(15)], p=0.5),
+    "invert": lambda: v2.RandomInvert(p=0.3),
+    "posterize": lambda: v2.RandomPosterize(bits=4, p=0.3),
+    "solarize": lambda: v2.RandomSolarize(threshold=128, p=0.3),
+    "sharpness": lambda: v2.RandomAdjustSharpness(sharpness_factor=2.0, p=0.3),
+    "autocontrast": lambda: v2.RandomAutocontrast(p=0.3),
+    "equalize": lambda: v2.RandomEqualize(p=0.3),
+    # policy-based (tuned on natural-image benchmarks; include the
+    # intensity-altering ops above — same caution applies, amplified)
+    "autoaugment": lambda: v2.AutoAugment(v2.AutoAugmentPolicy.IMAGENET),
+    "randaugment": lambda: v2.RandAugment(),
+    "trivialaugment": lambda: v2.TrivialAugmentWide(),
+}
+
+
+def build_augmentation(names) -> v2.Compose | None:
+    """Compose the named catalog entries, in the order given (None if empty)."""
+    if not names:
+        return None
+    unknown = [n for n in names if n not in AUGMENTATIONS]
+    if unknown:
+        raise ValueError(f"unknown augmentation(s) {unknown}; "
+                         f"choose from {sorted(AUGMENTATIONS)}")
+    return v2.Compose([AUGMENTATIONS[n]() for n in names])
+
+
 def build_transform(imagenet_norm: bool) -> v2.Compose:
     """The model input pipeline: CHW uint8 -> resize 224 -> float [0,1] ->
     optional ImageNet normalization. Shared by training, evaluation, and
@@ -113,12 +155,14 @@ class H5SnippetDataset(Dataset):
     -> optional ImageNet normalization. Grayscale is repeated to 3 channels.
     """
 
-    def __init__(self, h5_path: str, split: int, imagenet_norm: bool = False):
+    def __init__(self, h5_path: str, split: int, imagenet_norm: bool = False,
+                 augment=None):
         if split not in SPLIT_NAMES:
             raise ValueError(f"split must be one of {list(SPLIT_NAMES)}, got {split}")
         self.h5_path = h5_path
         self.split = split
         self.imagenet_norm = imagenet_norm
+        self.augment = build_augmentation(augment)
         self._file: h5py.File | None = None  # opened lazily per worker
 
         with h5py.File(h5_path, "r") as f:
@@ -144,6 +188,8 @@ class H5SnippetDataset(Dataset):
         img = torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1)  # CHW
         if img.shape[0] == 1:
             img = img.expand(3, -1, -1)
+        if self.augment is not None:  # training split only; still uint8 here
+            img = self.augment(img.contiguous())
         img = self.transform(img)
 
         return img, int(self.labels[i]), i
