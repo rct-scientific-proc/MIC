@@ -876,6 +876,19 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
     never silently diverge.</div>
   </div>
 
+  <div class="arg" id="t-no-cache-images">
+    <div class="arg-head"><span class="flag">--no-cache-images</span><span class="badge">switch</span><span class="badge">default: off (auto-cache)</span></div>
+    <p>By default each split's images are loaded into RAM once at startup
+    whenever they fit in 2 GiB (one sequential bulk read), and training reads
+    from memory. Pass this flag to stream per-sample from the h5 instead —
+    only sensible for datasets too big for RAM. Streaming warning: a gzip h5
+    whose chunk layout packs many images per chunk (h5py's default) makes
+    shuffled per-sample reads decompress a whole slab per image — measured
+    21x slower than the cache; the dataset prints a warning when it detects
+    that layout, and files from <code>tests/make_real_h5.py</code> use
+    per-image chunks to avoid it.</p>
+  </div>
+
   <div class="arg" id="t-augment">
     <div class="arg-head"><span class="flag">--augment</span><span class="badge">one or more specs</span><span class="badge">default: none</span></div>
     <p>Training-split augmentations, applied in the order given. Validation,
@@ -1188,7 +1201,10 @@ policy      autoaugment (ImageNet policy, no params)
   <code>--subset-per-class</code> caps samples per original class for quick
   experiments. The more classes you assign to hard_negative (e.g. cifar100
   with <code>--hn-classes 80</code>), the closer the file gets to this
-  pipeline's heavy-imbalance regime.</p>
+  pipeline's heavy-imbalance regime. Files are written gzip-compressed with
+  <strong>per-image chunks</strong> so per-sample reads stay fast; files
+  generated before that fix stream slowly, but the training-side RAM cache
+  (on by default) makes them fast anyway — or simply regenerate.</p>
 </section>
 
 <section class="tool" id="outputs">
