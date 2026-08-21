@@ -1,12 +1,15 @@
 """Rewrite an h5 dataset into a load-optimized layout.
 
-Any h5 in the h5_format.md layout — whatever wrote it — is repacked with
-per-image chunks and your choice of compression, so shuffled per-sample
-reads never decompress multi-image slabs (h5py's default chunking under
-gzip is pathologically slow to stream: a single-image read can decompress
-thousands of images). Labels/gt/split/classes are copied verbatim; the
-output is validated and a measured random-read throughput comparison is
-printed.
+Any h5 in the h5_format.md layout — whatever wrote it — is rewritten with a
+CONTIGUOUS, UNCOMPRESSED images dataset (the default): every per-sample
+read is then a direct offset into the file, with no chunk lookup and no
+decompression, and the OS page cache serves repeats. Compressed sources
+(h5py's default chunking under gzip is pathologically slow to stream: a
+single-image read can decompress thousands of images) become fast files at
+the cost of disk. --compression gzip/lzf is still available when disk
+matters more than read speed (written with per-image chunks so reads stay
+sane). Labels/gt/split/classes are copied verbatim; the output is
+validated and a measured random-read throughput comparison is printed.
 
 Optional --resize N additionally resizes every image to NxN (the model
 input size is 224), batched through the GPU when available. Worthwhile
@@ -16,9 +19,9 @@ already at model size). When sources are smaller, pre-resizing inflates
 the file by the square of the scale factor (32px -> 224px is 49x) and can
 push it past the training RAM cache — the script warns before doing it.
 
-    python optimize_h5.py in.h5 out.h5                  # repack only
-    python optimize_h5.py in.h5 out.h5 --resize 224     # repack + resize
-    python optimize_h5.py in.h5 out.h5 --compression none
+    python optimize_h5.py in.h5 out.h5                  # contiguous, no compression
+    python optimize_h5.py in.h5 out.h5 --resize 224     # + resize to model size
+    python optimize_h5.py in.h5 out.h5 --compression gzip   # smaller, slower reads
 """
 
 from __future__ import annotations
@@ -44,8 +47,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help=f"resize images to NxN (model input is "
                         f"{RESNET_INPUT_SIZE}); optional — omit to repack "
                         "only")
-    p.add_argument("--compression", choices=("gzip", "lzf", "none"),
-                   default="gzip")
+    p.add_argument("--compression", choices=("none", "gzip", "lzf"),
+                   default="none",
+                   help="default none: contiguous unchunked images, direct "
+                        "offset reads; gzip/lzf trade read speed for disk "
+                        "(written with per-image chunks)")
     p.add_argument("--gzip-level", type=int, default=4, choices=range(0, 10))
     p.add_argument("--batch-size", type=int, default=1024,
                    help="images processed per read/resize/write step")
@@ -86,8 +92,8 @@ def main(argv=None) -> None:
                   f"{new_logical / old_logical:.1f}x "
                   f"({old_logical / 1e6:.0f} MB -> {new_logical / 1e6:.0f} MB "
                   "uncompressed). Pre-resizing only pays off when sources are "
-                  "larger than the target; for small sources prefer the "
-                  "training RAM cache + --workers.")
+                  "larger than the target; for small sources keep the source "
+                  "size and let training resize (--workers parallelizes it).")
 
         resizer = None
         if resizing:
@@ -95,18 +101,20 @@ def main(argv=None) -> None:
                                 interpolation=v2.InterpolationMode.BILINEAR,
                                 antialias=True)
 
+        # compression requires chunking in HDF5; without it, write a
+        # contiguous unchunked dataset so reads are direct offsets
         comp = {}
         if args.compression == "gzip":
-            comp = dict(compression="gzip", compression_opts=args.gzip_level)
+            comp = dict(compression="gzip", compression_opts=args.gzip_level,
+                        chunks=(1, oh, ow, c))
         elif args.compression == "lzf":
-            comp = dict(compression="lzf")
+            comp = dict(compression="lzf", chunks=(1, oh, ow, c))
 
         out = Path(args.output)
         out.parent.mkdir(parents=True, exist_ok=True)
         with h5py.File(out, "w") as fout:
             dset = fout.create_dataset("images", shape=(n, oh, ow, c),
-                                       dtype=np.uint8,
-                                       chunks=(1, oh, ow, c), **comp)
+                                       dtype=np.uint8, **comp)
             for name in ("labels", "gt", "split"):
                 fout[name] = fin[name][:]
             fout["classes"] = np.array(fin["classes"].asstr()[:], dtype=object)

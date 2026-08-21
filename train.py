@@ -228,11 +228,6 @@ def build_parser() -> argparse.ArgumentParser:
     d = p.add_argument_group("data")
     d.add_argument("--imagenet-norm", action="store_true",
                    help="ImageNet mean/std normalization (default: just /255)")
-    d.add_argument("--no-cache-images", action="store_true",
-                   help="stream images from the h5 per sample instead of "
-                        "caching the split in RAM (auto-cache is on whenever "
-                        "the split fits in 2 GiB; streaming a gzip h5 with "
-                        "multi-image chunks is pathologically slow)")
     d.add_argument("--augment", nargs="+", default=None,
                    metavar="NAME[:k=v,...]",
                    help="training-split augmentations, applied in the order "
@@ -503,13 +498,10 @@ def main(argv=None) -> None:
     for split_name, c in summary["counts"].items():
         print(f"  {split_name}: {c['genuine']} genuine, {c['hard_negative']} hard negatives")
 
-    cache = False if args.no_cache_images else "auto"
     train_ds = H5SnippetDataset(args.h5, SPLIT_TRAIN,
                                 imagenet_norm=args.imagenet_norm,
-                                augment=args.augment, cache_images=cache)
-    val_ds = H5SnippetDataset(args.h5, SPLIT_VAL,
-                              imagenet_norm=args.imagenet_norm,
-                              cache_images=cache)
+                                augment=args.augment)
+    val_ds = H5SnippetDataset(args.h5, SPLIT_VAL, imagenet_norm=args.imagenet_norm)
     if args.augment:
         print("augmentations (train split only):",
               ", ".join(str(a) for a in args.augment))

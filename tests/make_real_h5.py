@@ -141,11 +141,10 @@ def main() -> None:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(out, "w") as f:
-        # per-image chunks: a random single-sample read decompresses exactly
-        # one image (default chunking packs many images per chunk, making
-        # shuffled per-sample streaming pathologically slow)
-        f.create_dataset("images", data=images, compression="gzip",
-                         compression_opts=4, chunks=(1, *images.shape[1:]))
+        # contiguous and uncompressed: a per-sample read is a direct offset
+        # into the file (compression/chunking make shuffled per-sample reads
+        # slow; disk is cheap, training time is not)
+        f.create_dataset("images", data=images)
         f["labels"] = labels
         f["gt"] = labels != hn_index
         f["split"] = split

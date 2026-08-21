@@ -232,13 +232,8 @@ class H5SnippetDataset(Dataset):
     -> optional ImageNet normalization. Grayscale is repeated to 3 channels.
     """
 
-    # auto-cache the split's images in RAM when they fit in this budget;
-    # per-sample streaming from a compressed h5 can be orders of magnitude
-    # slower (every read decompresses a whole multi-image chunk)
-    CACHE_BUDGET_BYTES = 2 * 1024**3
-
     def __init__(self, h5_path: str, split: int, imagenet_norm: bool = False,
-                 augment=None, cache_images="auto"):
+                 augment=None):
         if split not in SPLIT_NAMES:
             raise ValueError(f"split must be one of {list(SPLIT_NAMES)}, got {split}")
         self.h5_path = h5_path
@@ -256,16 +251,16 @@ class H5SnippetDataset(Dataset):
 
             images = f["images"]
             src_hw = tuple(images.shape[1:3])
-            split_bytes = len(self.indices) * int(np.prod(images.shape[1:]))
-            if cache_images == "auto":
-                cache_images = split_bytes <= self.CACHE_BUDGET_BYTES
-            self.cached = images[self.indices] if cache_images else None
-            if self.cached is None and images.compression and \
-                    images.chunks and images.chunks[0] > 1:
-                print(f"WARNING: {h5_path} streams compressed multi-image "
-                      f"chunks {images.chunks} per sample read — expect very "
-                      "slow loading. Cache the split in RAM (default when it "
-                      "fits) or rewrite the file with per-image chunks.")
+            # Every read is a per-sample random access. A contiguous
+            # uncompressed images dataset is a direct offset read (the OS
+            # page cache does the rest); a compressed multi-image-chunk
+            # layout decompresses a whole slab per sample and is
+            # pathologically slow.
+            if images.compression and images.chunks and images.chunks[0] > 1:
+                print(f"WARNING: {h5_path} stores compressed multi-image "
+                      f"chunks {images.chunks}; per-sample reads will be very "
+                      "slow. Rewrite it with: python optimize_h5.py "
+                      f"{h5_path} <out.h5>")
 
         self.hard_negative_index = len(self.classes) - 1
         self.num_classes = len(self.classes)
@@ -280,12 +275,9 @@ class H5SnippetDataset(Dataset):
         return len(self.indices)
 
     def __getitem__(self, i: int):
-        if self.cached is not None:
-            img = self.cached[i]  # (H, W, C) uint8, RAM
-        else:
-            if self._file is None:
-                self._file = h5py.File(self.h5_path, "r")
-            img = self._file["images"][self.indices[i]]  # (H, W, C) uint8
+        if self._file is None:
+            self._file = h5py.File(self.h5_path, "r")
+        img = self._file["images"][self.indices[i]]  # (H, W, C) uint8
         img = torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1)  # CHW
         if img.shape[0] == 1:
             img = img.expand(3, -1, -1)
