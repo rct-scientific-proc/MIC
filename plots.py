@@ -305,6 +305,44 @@ def plot_sample_grid(images: list[np.ndarray], captions: list[str], title: str,
     _save(fig, path)
 
 
+def plot_score_split(pos_scores, neg_scores, path, threshold=None,
+                     marks=None) -> None:
+    """Genuineness-score distributions of windows that cover a ground-truth
+    point vs all other windows, with the stored operating threshold and
+    optional labelled marks (e.g. the thresholds that achieve fixed
+    recalls). Log-scaled counts: background windows outnumber GT windows by
+    orders of magnitude."""
+    pos = np.asarray(pos_scores)
+    neg = np.asarray(neg_scores)
+    fig, ax = _new_axes((7.2, 4.0))
+    bins = np.linspace(0.0, 1.0, 41)
+    ax.hist(neg, bins, color=SERIES[1], alpha=0.55,
+            label=f"background windows (n={len(neg)})")
+    ax.hist(pos, bins, color=SERIES[2], alpha=0.8,
+            label=f"windows on GT points (n={len(pos)})")
+    ax.set_yscale("log")
+    if threshold is not None:
+        ax.axvline(threshold, color=INK, linewidth=1.4, linestyle=(0, (4, 3)))
+        ax.text(threshold, ax.get_ylim()[1], f" stored thr {threshold:.3f}",
+                fontsize=8, color=INK, va="top", ha="left")
+    y_lo, y_hi = ax.get_ylim()
+    for i, (label, x) in enumerate(marks or []):
+        ax.axvline(x, color=MUTED, linewidth=1, linestyle=(0, (1, 3)))
+        # stagger alternate labels so neighbouring thresholds stay legible
+        y_text = y_lo * (1.6 if i % 2 == 0 else 1.6 * (y_hi / y_lo) ** 0.35)
+        ax.text(x, y_text, f" {label}", fontsize=7, color=INK_2,
+                rotation=90, va="bottom", ha="left")
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_xlabel("genuineness score s")
+    ax.set_ylabel("windows (log)")
+    ax.set_title("Score separation: GT windows vs background")
+    leg = ax.legend(loc="upper center", fontsize=8, framealpha=0.9,
+                    facecolor=SURFACE, edgecolor=GRID)
+    for text in leg.get_texts():
+        text.set_color(INK_2)
+    _save(fig, path)
+
+
 def plot_calibration(cal: dict, path, threshold: float | None = None) -> None:
     """Reliability diagram for the genuineness score.
 

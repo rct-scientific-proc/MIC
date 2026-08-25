@@ -1077,6 +1077,16 @@ policy      autoaugment (ImageNet policy, no params)
     count as false-positive windows. Points whose class the model doesn't
     know are flagged and excluded from the hit rate. Adds:</p>
     <ul>
+      <li>a <strong>cover verdict</strong> — GT hit rate at the stored operating
+      point (box colored green / amber / red by rate), false positives per
+      image, specificity at 95% window recall with its threshold beside the
+      stored one, and failure-mode counts — plus a <strong>per-class table</strong>
+      (GT points, hits, hit rate, windows classified, confusions, rejections,
+      AUC)</li>
+      <li>an <strong>Operating point</strong> page: a score-separation histogram
+      (windows on GT points vs background, log scale) with the stored
+      threshold and the fixed-recall thresholds marked — the single chart
+      that shows whether the operating point is too strict</li>
       <li><code>gt_results.csv</code> — one row per point: image, id, class,
       pixel position, hit, best covering-window score, known-class flag</li>
       <li>hit/miss markers on the overlay PNGs in <code>assets/</code>

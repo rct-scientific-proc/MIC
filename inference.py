@@ -10,10 +10,14 @@ is accepted as a genuine (non-hard-negative) class.
 Outputs in --out-dir:
     detections.csv           every accepted window: image, x, y, w, h,
                              class, score
-    report_<UTCstamp>.pdf    summary table of all images; one annotated page
-                             per image that contains detections (raw window
-                             boxes, colored per class)
-    assets/                  the annotated overlay PNGs
+    report_<UTCstamp>.pdf    cover (run facts, per-image table) and, with
+                             --gt, a verdict box, per-class summary, score
+                             separation + specificity-at-recall, per-class
+                             ROC, and snippet grids (top-N, ranked
+                             should-have-caught, confusions, rejections)
+    assets/                  annotated overlay PNGs (window boxes, GT
+                             hit/miss markers) and the report's chart/grid
+                             PNGs
 
 Example:
     python inference.py runs/exp1 photo1.png scans/ \
@@ -38,7 +42,8 @@ from checkpoints import find_checkpoint, utc_stamp
 from dataset import build_transform
 from metrics import _per_sample_thresholds, genuineness_scores, non_hn_argmax
 from model import build_model
-from plots import SERIES, plot_per_class_rocs, plot_sample_grid
+from plots import (SERIES, plot_per_class_rocs, plot_sample_grid,
+                   plot_score_split)
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
@@ -46,6 +51,13 @@ INK = (11, 11, 11)
 INK_2 = (82, 81, 78)
 MUTED = (137, 135, 129)
 LINE = (225, 224, 217)
+PLANE = (246, 246, 243)
+GOOD = (12, 163, 12)
+GOOD_WASH = (236, 247, 236)
+WARN = (200, 130, 0)
+WARN_WASH = (253, 246, 231)
+CRIT = (208, 59, 59)
+CRIT_WASH = (251, 235, 235)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -352,6 +364,26 @@ def gt_analytics(results, classes, hn_index: int, operating,
                              "recall": float((sarr[pos] >= t).mean()),
                              "specificity": float((neg < t).mean())})
     out["spec_at_recall"] = spec_tbl
+    out["pos_scores"] = sarr[pos]
+    out["neg_scores"] = sarr[~pos]
+
+    # per-class summary for the cover page
+    per_class = []
+    for c in range(K):
+        if c == hn_index:
+            continue
+        cname = classes[c]
+        pts = [p for r in results if r.get("gt")
+               for p in r["gt"]["points"] if p["known"] and p["class"] == cname]
+        per_class.append({
+            "class": cname, "points": len(pts),
+            "hit": sum(1 for p in pts if p["hit"]),
+            "classified": len(pools[c]),
+            "confused": sum(1 for r_ in out["wrong_class"] if cname in r_["covers"]),
+            "rejected": sum(1 for r_ in out["rejected_tp"] if cname in r_["covers"]),
+            "auc": rocs[cname][2] if cname in rocs else float("nan"),
+        })
+    out["per_class"] = per_class
     return out
 
 
@@ -426,11 +458,49 @@ def _h1(pdf, text):
     pdf.ln(2.5)
 
 
+def _h2(pdf, text):
+    pdf.ln(1.5)
+    pdf.set_font("helvetica", "B", 11)
+    pdf.set_text_color(*INK)
+    pdf.cell(0, 7, _txt(text), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(0.5)
+
+
 def _para(pdf, text, size=9.5):
     pdf.set_font("helvetica", "", size)
     pdf.set_text_color(*INK_2)
     pdf.multi_cell(0, 5, _txt(text), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(0.5)
+
+
+def _kv(pdf, pairs, key_w=46):
+    pdf.set_font("helvetica", "", 9.5)
+    for k, v in pairs:
+        pdf.set_text_color(*MUTED)
+        pdf.cell(key_w, 5.4, _txt(k))
+        pdf.set_text_color(*INK)
+        pdf.multi_cell(0, 5.4, _txt(v), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(1)
+
+
+def _box(pdf, lines, fill, edge, title=None):
+    """Filled, outlined callout (verdict / warnings)."""
+    pdf.set_fill_color(*fill)
+    pdf.set_draw_color(*edge)
+    start_y = pdf.get_y()
+    pdf.set_x(pdf.l_margin)
+    if title:
+        pdf.set_font("helvetica", "B", 9)
+        pdf.set_text_color(*edge)
+        pdf.multi_cell(0, 6, _txt(title), fill=True, new_x="LMARGIN",
+                       new_y="NEXT")
+    pdf.set_font("helvetica", "", 9.5)
+    pdf.set_text_color(*INK)
+    for line in lines:
+        pdf.multi_cell(0, 5.2, _txt(line), fill=True, new_x="LMARGIN",
+                       new_y="NEXT")
+    pdf.rect(pdf.l_margin, start_y, pdf.epw, pdf.get_y() - start_y)
+    pdf.ln(2.5)
 
 
 def _table(pdf, headers, rows, widths):
@@ -442,11 +512,12 @@ def _table(pdf, headers, rows, widths):
     pdf.set_font("helvetica", "", 8.8)
     pdf.set_text_color(*INK)
     pdf.set_draw_color(*LINE)
-    for row in rows:
+    pdf.set_fill_color(*PLANE)
+    for i, row in enumerate(rows):
         if pdf.get_y() > pdf.page_break_trigger - 8:
             pdf.add_page()
         for v, wd in zip(row, widths):
-            pdf.cell(wd, 5.4, _txt(v), border="B")
+            pdf.cell(wd, 5.4, _txt(v), border="B", fill=(i % 2 == 1))
         pdf.ln()
     pdf.ln(1.5)
 
@@ -465,34 +536,85 @@ def _image(pdf, path, w=None):
 
 
 def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
-              ckpt_path, args, analytics: dict | None = None) -> Path:
+              ckpt_path, args, analytics: dict | None = None,
+              operating=None) -> Path:
     pdf = _Pdf(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=16)
     pdf.add_page()
 
     total_det = sum(len(r["detections"]) for r in results)
+    total_windows = sum(r["n_windows"] for r in results)
     has_gt = any(r["gt"] is not None for r in results)
+    if isinstance(operating, dict):
+        thr_txt = (f"per-class [{min(operating.values()):.3f} .. "
+                   f"{max(operating.values()):.3f}]")
+        thr_scalar = None
+    else:
+        thr_txt = f"{operating:.4f}" if operating is not None else "-"
+        thr_scalar = operating
+
     _h1(pdf, "Blind inference report")
-    _para(pdf, f"checkpoint: {ckpt_path}")
-    _para(pdf, f"window {args.window_width}x{args.window_height}, stride "
-               f"{args.stride_x}x{args.stride_y}, "
-               f"{'grayscale' if args.grayscale else 'RGB'} input | "
-               f"{len(results)} images, {total_det} detections in "
-               f"{sum(1 for r in results if r['detections'])} images")
+    _kv(pdf, [
+        ("generated", utc_stamp()),
+        ("checkpoint", f"{Path(ckpt_path).name}  ({Path(ckpt_path).parent})"),
+        ("classes", ", ".join(classes)),
+        ("stored threshold", thr_txt),
+        ("windows", f"{args.window_width}x{args.window_height} px, stride "
+                    f"{args.stride_x}x{args.stride_y}, "
+                    f"{'grayscale' if args.grayscale else 'RGB'} input"),
+        ("images", f"{len(results)} images, {total_windows} windows, "
+                   f"{total_det} detections in "
+                   f"{sum(1 for r in results if r['detections'])} images"),
+    ] + ([("ground truth", f"{args.gt}  "
+                          f"({sum(1 for r in results if r['gt'])} of "
+                          f"{len(results)} images matched)")] if has_gt else []))
+
     if has_gt:
         n_scored = sum(r["gt"]["n_scored"] for r in results if r["gt"])
         n_hit = sum(r["gt"]["n_hit"] for r in results if r["gt"])
         n_fp = sum(r["gt"]["fp_windows"] for r in results if r["gt"])
-        _para(pdf, f"ground truth ({args.gt}): {n_hit}/{n_scored} points hit "
-                   f"({n_hit / max(n_scored, 1):.1%}), {n_fp} false-positive "
-                   "windows across matched images. Overlays mark hits green, "
-                   "misses red.")
+        rate = n_hit / max(n_scored, 1)
+        fill, edge = ((GOOD_WASH, GOOD) if rate >= 0.95 else
+                      (WARN_WASH, WARN) if rate >= 0.8 else (CRIT_WASH, CRIT))
+        lines = [f"GT points hit at the stored operating point: {n_hit}/{n_scored} "
+                 f"({rate:.1%})"]
         if analytics:
-            _para(pdf, f"false positives per image: mean "
-                       f"{analytics['fp_mean']:.2f}, std "
-                       f"{analytics['fp_std']:.2f}")
+            lines.append(f"false positives per image: "
+                         f"{analytics['fp_mean']:.2f} +/- {analytics['fp_std']:.2f} "
+                         f"({n_fp} total across "
+                         f"{len(analytics['fp_counts'])} images)")
+            s95 = next((row for row in analytics["spec_at_recall"]
+                        if abs(row["target"] - 0.95) < 1e-9), None)
+            if s95:
+                lines.append(f"specificity at 95% window recall: "
+                             f"{s95['specificity']:.4f} at threshold "
+                             f"{s95['threshold']:.3f}"
+                             + (f" (stored threshold {thr_scalar:.3f})"
+                                if thr_scalar is not None else ""))
+            lines.append(f"failure modes: {len(analytics['wrong_class'])} "
+                         "accepted as the wrong class, "
+                         f"{len(analytics['rejected_tp'])} GT windows rejected "
+                         "to hard_negative")
+        _box(pdf, lines, fill, edge, title="Verdict")
 
-    if has_gt:
+        if analytics and analytics.get("per_class"):
+            _h2(pdf, "Per class")
+            _table(pdf, ["class", "GT points", "hit", "hit rate", "classified",
+                         "confused", "rejected", "AUC"],
+                   [[row["class"], row["points"], row["hit"],
+                     f"{row['hit'] / row['points']:.0%}" if row["points"] else "-",
+                     row["classified"], row["confused"], row["rejected"],
+                     f"{row['auc']:.3f}" if row["auc"] == row["auc"] else "-"]
+                    for row in analytics["per_class"]],
+                   widths=[pdf.epw * v for v in
+                           (0.2, 0.11, 0.09, 0.11, 0.13, 0.12, 0.12, 0.12)])
+            _para(pdf, "classified = windows argmax-routed to the class; "
+                       "confused = accepted as another genuine class while on "
+                       "this class's point; rejected = on this class's point "
+                       "but called hard_negative; AUC = one-vs-rest over all "
+                       "windows.", size=8)
+
+        _h2(pdf, "Per image")
         _table(pdf, ["image", "size", "windows", "detections", "gt hit", "FP win"],
                [[r["path"].name, f"{r['size'][0]}x{r['size'][1]}",
                  r["n_windows"], len(r["detections"]),
@@ -525,29 +647,44 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
             return a[row["y"]:row["y"] + row["h"], row["x"]:row["x"] + row["w"]]
 
         pdf.add_page()
-        _h1(pdf, "Ground-truth metrics")
+        _h1(pdf, "Operating point")
+        _para(pdf, "How well the genuineness score separates windows that sit "
+                   "on a labelled point from everything else - and where the "
+                   "stored threshold falls relative to the thresholds that "
+                   "would achieve fixed recalls.")
+        if len(analytics["pos_scores"]) and len(analytics["neg_scores"]):
+            split_png = assets / "gt_score_split.png"
+            plot_score_split(
+                analytics["pos_scores"], analytics["neg_scores"], split_png,
+                threshold=thr_scalar,
+                marks=[(f"{row['target']:.0%} recall", row["threshold"])
+                       for row in analytics["spec_at_recall"]])
+            _image(pdf, split_png)
         if analytics["spec_at_recall"]:
-            _para(pdf, "Specificity at fixed recall over all windows "
-                       "(positive = window covers a known GT point; score = "
-                       "genuineness s):")
+            _h2(pdf, "Specificity at fixed recall")
             _table(pdf, ["target recall", "achieved recall", "specificity",
                          "threshold"],
                    [[f"{row['target']:.0%}", f"{row['recall']:.4f}",
                      f"{row['specificity']:.4f}", f"{row['threshold']:.4f}"]
                     for row in analytics["spec_at_recall"]],
                    widths=[pdf.epw * v for v in (0.25, 0.25, 0.25, 0.25)])
-        _para(pdf, f"false positives per image: counts "
-                   f"{analytics['fp_counts']}, mean {analytics['fp_mean']:.2f}, "
-                   f"std {analytics['fp_std']:.2f}")
-        _para(pdf, f"failure modes: {len(analytics['wrong_class'])} windows "
-                   "accepted as the wrong class; "
-                   f"{len(analytics['rejected_tp'])} GT-covering windows "
-                   "rejected to hard_negative (grids follow when non-zero).")
+            _para(pdf, "positive = window covers a known GT point, score = "
+                       "genuineness s; each row's threshold is directly "
+                       "comparable to the stored operating threshold.", size=8)
+        _h2(pdf, "False positives per image")
+        _table(pdf, ["image", "FP windows"],
+               [[r["path"].name, r["gt"]["fp_windows"]]
+                for r in results if r["gt"]]
+               + [["mean +/- std", f"{analytics['fp_mean']:.2f} +/- "
+                                   f"{analytics['fp_std']:.2f}"]],
+               widths=[pdf.epw * 0.6, pdf.epw * 0.4])
         if analytics["rocs"]:
+            pdf.add_page()
+            _h1(pdf, "Per-class ROC")
             roc_png = assets / "gt_roc.png"
             dropped = plot_per_class_rocs(analytics["rocs"], roc_png)
-            _image(pdf, roc_png, w=pdf.epw * 0.8)
-            _para(pdf, "Per-class ROC over all windows: score = P(class), "
+            _image(pdf, roc_png, w=pdf.epw * 0.85)
+            _para(pdf, "One-vs-rest over all windows: score = P(class), "
                        "positive = window covers a GT point of the class."
                        + (f" Omitted: {', '.join(dropped)}." if dropped else ""),
                   size=8.5)
@@ -556,6 +693,9 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
             pdf.add_page()
             cname = classes[c]
             _h1(pdf, f"Top {len(pool)} '{cname}' classifications")
+            _para(pdf, f"The model's most confident '{cname}' calls across "
+                       "all images - a healthy model shows a solid green row.",
+                  size=8.5)
             crops = [_bordered(crop_of(r_),
                                r_["accepted"] and cname in r_["covers"])
                      for r_ in pool]
@@ -579,6 +719,13 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                 _h1(pdf, f"'{cname}' windows on GT points"
                          + (f" ({start + 1}-{start + len(chunk)} of "
                             f"{len(entries)})" if len(entries) > 20 else ""))
+                if start == 0:
+                    _para(pdf, "Every window that should have been called "
+                               f"'{cname}', ranked by confidence among all "
+                               f"windows classified '{cname}' - red near the "
+                               "top of the ranking means confident misses; "
+                               "red near the bottom means the threshold, not "
+                               "the classifier.", size=8.5)
                 crops = [_bordered(crop_of(e["row"]), e["correct"])
                          for e in chunk]
                 caps = [f"rank {e['rank']}/{e['total']}\n"
@@ -600,7 +747,12 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
             pdf.add_page()
             _h1(pdf, "Accepted as the WRONG class"
                      + (f" ({start + 1}-{start + len(chunk)} of {len(wrong)})"
-                        if len(wrong) > 20 else ""))
+                        if len(wrong) > 16 else ""))
+            if start == 0:
+                _para(pdf, "Cross-class confusions: accepted windows sitting "
+                           "on a GT point of a different genuine class, most "
+                           "confident first. Caption: called X, true Y, P(X).",
+                      size=8.5)
             crops = [_bordered(crop_of(r_), False) for r_ in chunk]
             caps = [f"called {classes[r_['pred']]}, "
                     f"true {'/'.join(sorted(r_['covers']))}\n"
@@ -618,7 +770,13 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
             pdf.add_page()
             _h1(pdf, "On a GT point but called hard_negative"
                      + (f" ({start + 1}-{start + len(chunk)} of {len(rej)})"
-                        if len(rej) > 20 else ""))
+                        if len(rej) > 16 else ""))
+            if start == 0:
+                _para(pdf, "Genuine windows the threshold rejected, nearest "
+                           "the operating point first. Correct argmax with a "
+                           "score just under the threshold means the "
+                           "operating point is too strict, not the model.",
+                      size=8.5)
             crops = [_bordered(crop_of(r_), False) for r_ in chunk]
             caps = [f"true {'/'.join(sorted(r_['covers']))}, "
                     f"argmax {classes[r_['pred']]}\ns={r_['s']:.3f}"
@@ -738,7 +896,7 @@ def main(argv=None) -> None:
 
     if not args.no_report:
         pdf_path = build_pdf(out_dir, results, classes, hn_index, ckpt_path,
-                             args, analytics=analytics)
+                             args, analytics=analytics, operating=operating)
         print(f"report: {pdf_path}")
     print(f"outputs written to {out_dir}")
 
