@@ -1025,9 +1025,11 @@ policy      autoaugment (ImageNet policy, no params)
   training preprocessing and the checkpoint's <strong>stored</strong> operating
   thresholds — a window is a detection when accepted as a genuine class.
   Outputs: <code>detections.csv</code> (every accepted window), a
-  <code>report_&lt;UTCstamp&gt;.pdf</code> with a summary table of all images and
-  one annotated page per image containing detections (raw window boxes,
-  colored per class), and the overlay PNGs in <code>assets/</code>.</p>
+  <code>report_&lt;UTCstamp&gt;.pdf</code> (summary table of all images plus the
+  ground-truth analytics sections when <code>--gt</code> is given), and
+  annotated whole-image overlay PNGs in <code>assets/</code> (raw window boxes
+  colored per class, GT hit/miss markers) — overlays live as files for
+  direct viewing rather than as report pages.</p>
 
   <div class="arg" id="i-checkpoint">
     <div class="arg-head"><span class="flag">checkpoint</span><span class="badge">positional · .pt or run dir</span><span class="badge">required</span></div>
@@ -1077,11 +1079,15 @@ policy      autoaugment (ImageNet policy, no params)
     <ul>
       <li><code>gt_results.csv</code> — one row per point: image, id, class,
       pixel position, hit, best covering-window score, known-class flag</li>
-      <li>hit/miss markers on the overlays (green circle = hit, red = miss),
-      and pages for images with misses even when they have zero detections —
-      a silent miss is the worst case to hide</li>
-      <li>GT columns in the report summary (points hit, FP windows), an
-      overall hit rate, and per-image missed-point tables</li>
+      <li>hit/miss markers on the overlay PNGs in <code>assets/</code>
+      (green circle = hit, red = miss)</li>
+      <li>GT columns in the report summary (points hit, FP windows) and an
+      overall hit rate</li>
+      <li><strong>failure-mode grids</strong>: windows accepted as the
+      <em>wrong</em> genuine class (cross-class confusions, most confident
+      first) and GT-covering windows rejected to hard_negative (nearest the
+      operating threshold first, with true class, argmax, and score) — the
+      two ways a labelled point gets missed, shown as actual snippets</li>
       <li>a <strong>Ground-truth metrics</strong> page: specificity at 85 / 90 /
       95 / 98% recall (over all windows; positive = window covers a known GT
       point, score = genuineness s, with the achieved threshold per row —

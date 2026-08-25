@@ -41,7 +41,6 @@ from model import build_model
 from plots import SERIES, plot_per_class_rocs, plot_sample_grid
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-MAX_TABLE_ROWS = 40  # per-image detection rows shown in the PDF
 
 INK = (11, 11, 11)
 INK_2 = (82, 81, 78)
@@ -311,6 +310,18 @@ def gt_analytics(results, classes, hn_index: int, operating,
             should[c] = entries
     out["should"] = should
 
+    # the two failure modes, as explicit lists:
+    # accepted with the WRONG genuine class (cross-class confusion), most
+    # confident first; and GT-covering windows rejected to hard_negative,
+    # nearest the threshold first
+    out["wrong_class"] = sorted(
+        (r_ for r_ in rows if r_["accepted"] and r_["covers"]
+         and classes[r_["pred"]] not in r_["covers"]),
+        key=lambda r_: -float(r_["probs"][r_["pred"]]))
+    out["rejected_tp"] = sorted(
+        (r_ for r_ in rows if r_["covers"] and not r_["accepted"]),
+        key=lambda r_: -r_["s"])
+
     # per-class ROC: score P(c), positive = window covers a class-c point
     rocs = {}
     for c in range(K):
@@ -461,7 +472,6 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
 
     total_det = sum(len(r["detections"]) for r in results)
     has_gt = any(r["gt"] is not None for r in results)
-    flagged = [r for r in results if r["overlay"] is not None]
     _h1(pdf, "Blind inference report")
     _para(pdf, f"checkpoint: {ckpt_path}")
     _para(pdf, f"window {args.window_width}x{args.window_height}, stride "
@@ -529,6 +539,10 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
         _para(pdf, f"false positives per image: counts "
                    f"{analytics['fp_counts']}, mean {analytics['fp_mean']:.2f}, "
                    f"std {analytics['fp_std']:.2f}")
+        _para(pdf, f"failure modes: {len(analytics['wrong_class'])} windows "
+                   "accepted as the wrong class; "
+                   f"{len(analytics['rejected_tp'])} GT-covering windows "
+                   "rejected to hard_negative (grids follow when non-zero).")
         if analytics["rocs"]:
             roc_png = assets / "gt_roc.png"
             dropped = plot_per_class_rocs(analytics["rocs"], roc_png)
@@ -580,41 +594,40 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                            f"classified {cname}; red = missed (rejected or "
                            "classified as something else).", size=8.5)
 
-    for r in flagged:
-        pdf.add_page()
-        _h1(pdf, r["path"].name)
-        counts = {}
-        for d in r["detections"]:
-            counts[d["class_index"]] = counts.get(d["class_index"], 0) + 1
-        legend = "  |  ".join(
-            f"{classes[c]}: {n} (color {genuine_slot(c, hn_index) + 1})"
-            for c, n in sorted(counts.items())) or "no detections"
-        if r["gt"] is not None:
-            legend += (f"  |  gt: {r['gt']['n_hit']}/{r['gt']['n_scored']} "
-                       f"hit, {r['gt']['fp_windows']} FP windows")
-        _para(pdf, legend)
-        _image(pdf, r["overlay"])
-        if r["gt"] is not None:
-            missed = [p for p in r["gt"]["points"] if p["known"] and not p["hit"]]
-            if missed:
-                _para(pdf, "missed ground-truth points:", size=8.5)
-                _table(pdf, ["id", "class", "x", "y"],
-                       [[p["id"], p["class"], f"{p['x']:.0f}", f"{p['y']:.0f}"]
-                        for p in missed],
-                       widths=[pdf.epw * w for w in (0.15, 0.4, 0.22, 0.23)])
-            if r["gt"]["unknown_classes"]:
-                _para(pdf, "gt classes unknown to this model (unscored): "
-                           + ", ".join(r["gt"]["unknown_classes"]), size=8.5)
-        rows = [[d["x"], d["y"], d["w"], d["h"], classes[d["class_index"]],
-                 f"{d['score']:.4f}"]
-                for d in sorted(r["detections"], key=lambda d: -d["score"])]
-        if len(rows) > MAX_TABLE_ROWS:
-            _para(pdf, f"top {MAX_TABLE_ROWS} of {len(rows)} detections by "
-                       "score (all are in detections.csv):", size=8.5)
-            rows = rows[:MAX_TABLE_ROWS]
-        if rows:
-            _table(pdf, ["x", "y", "w", "h", "class", "score"], rows,
-                   widths=[pdf.epw * w for w in (0.14, 0.14, 0.12, 0.12, 0.28, 0.2)])
+        wrong = analytics["wrong_class"]
+        for start in range(0, len(wrong), 16):
+            chunk = wrong[start:start + 16]
+            pdf.add_page()
+            _h1(pdf, "Accepted as the WRONG class"
+                     + (f" ({start + 1}-{start + len(chunk)} of {len(wrong)})"
+                        if len(wrong) > 20 else ""))
+            crops = [_bordered(crop_of(r_), False) for r_ in chunk]
+            caps = [f"called {classes[r_['pred']]}, "
+                    f"true {'/'.join(sorted(r_['covers']))}\n"
+                    f"P={float(r_['probs'][r_['pred']]):.3f}" for r_ in chunk]
+            png = assets / f"gt_wrong_{start}.png"
+            plot_sample_grid(crops, caps,
+                             "cross-class confusions: accepted windows on a "
+                             "GT point of a DIFFERENT genuine class, most "
+                             "confident first", png, ncols=5)
+            _image(pdf, png)
+
+        rej = analytics["rejected_tp"]
+        for start in range(0, len(rej), 16):
+            chunk = rej[start:start + 16]
+            pdf.add_page()
+            _h1(pdf, "On a GT point but called hard_negative"
+                     + (f" ({start + 1}-{start + len(chunk)} of {len(rej)})"
+                        if len(rej) > 20 else ""))
+            crops = [_bordered(crop_of(r_), False) for r_ in chunk]
+            caps = [f"true {'/'.join(sorted(r_['covers']))}, "
+                    f"argmax {classes[r_['pred']]}\ns={r_['s']:.3f}"
+                    for r_ in chunk]
+            png = assets / f"gt_rejected_{start}.png"
+            plot_sample_grid(crops, caps,
+                             "genuine windows rejected by the threshold, "
+                             "nearest the operating point first", png, ncols=5)
+            _image(pdf, png)
 
     out_path = out_dir / f"report_{utc_stamp()}.pdf"
     pdf.output(str(out_path))
