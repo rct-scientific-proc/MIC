@@ -690,18 +690,28 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                        + (f" Omitted: {', '.join(dropped)}." if dropped else ""),
                   size=8.5)
 
+        def thr_for(c):
+            return operating[c] if isinstance(operating, dict) else operating
+
+        def cutoff_txt(c):
+            thr = thr_for(c)
+            return ("" if thr is None else
+                    f" Acceptance cutoff for '{classes[c]}': s >= {thr:.3f}"
+                    + (" (per-class)" if isinstance(operating, dict)
+                       else " (global)") + ".")
+
         for c, pool in sorted(analytics["topn"].items()):
             pdf.add_page()
             cname = classes[c]
             _h1(pdf, f"Top {len(pool)} '{cname}' classifications")
             _para(pdf, f"The model's most confident '{cname}' calls across "
-                       "all images - a healthy model shows a solid green row.",
-                  size=8.5)
+                       "all images - a healthy model shows a solid green row."
+                       + cutoff_txt(c), size=8.5)
             crops = [_bordered(crop_of(r_),
                                r_["accepted"] and cname in r_["covers"])
                      for r_ in pool]
             caps = [f"{results[r_['img']]['path'].stem}\n"
-                    f"P={float(r_['probs'][c]):.3f}"
+                    f"P={float(r_['probs'][c]):.3f} s={r_['s']:.3f}"
                     + (" ACC" if r_["accepted"] else "") for r_ in pool]
             png = assets / f"gt_top_{c}.png"
             plot_sample_grid(crops, caps,
@@ -729,13 +739,16 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                                "the classifier. Windows whose argmax was "
                                "another class are not in that pool; they "
                                "follow it, labelled with the class they were "
-                               "called instead.", size=8.5)
+                               "called instead." + cutoff_txt(c)
+                               + " Green = s at or above the cutoff AND "
+                               f"argmax {cname}.", size=8.5)
                 crops = [_bordered(crop_of(e["row"]), e["correct"])
                          for e in chunk]
                 caps = [(f"rank {e['rank']}/{e['total']}"
                          if e["in_pool"] else
                          f"not in pool: argmax {classes[e['row']['pred']]}")
-                        + f"\nP={e['pc']:.3f}" for e in chunk]
+                        + f"\nP={e['pc']:.3f} s={e['row']['s']:.3f}"
+                        for e in chunk]
                 png = assets / f"gt_should_{c}_{start}.png"
                 plot_sample_grid(
                     crops, caps,
@@ -757,12 +770,14 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
             if start == 0:
                 _para(pdf, "Cross-class confusions: accepted windows sitting "
                            "on a GT point of a different genuine class, most "
-                           "confident first. Caption: called X, true Y, P(X).",
+                           "confident first. Caption: called X, true Y, P(X), "
+                           "s (accepted, so s is at or above the cutoff for X).",
                       size=8.5)
             crops = [_bordered(crop_of(r_), False) for r_ in chunk]
             caps = [f"called {classes[r_['pred']]}, "
                     f"true {'/'.join(sorted(r_['covers']))}\n"
-                    f"P={float(r_['probs'][r_['pred']]):.3f}" for r_ in chunk]
+                    f"P={float(r_['probs'][r_['pred']]):.3f} s={r_['s']:.3f}"
+                    for r_ in chunk]
             png = assets / f"gt_wrong_{start}.png"
             plot_sample_grid(crops, caps,
                              "cross-class confusions: accepted windows on a "
@@ -781,7 +796,10 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                 _para(pdf, "Genuine windows the threshold rejected, nearest "
                            "the operating point first. Correct argmax with a "
                            "score just under the threshold means the "
-                           "operating point is too strict, not the model.",
+                           "operating point is too strict, not the model."
+                           + (f" Cutoff: s >= {thr_scalar:.3f} (global)."
+                              if thr_scalar is not None else
+                              " Cutoffs are per-class; see each class page."),
                       size=8.5)
             crops = [_bordered(crop_of(r_), False) for r_ in chunk]
             caps = [f"true {'/'.join(sorted(r_['covers']))}, "

@@ -1114,7 +1114,13 @@ policy      autoaugment (ImageNet policy, no params)
       miss mode (e.g. off-center windows) visible at a glance. Windows whose
       argmax was a <em>different</em> class are not in that pool; they follow
       it labelled "not in pool: argmax X" rather than with an out-of-range
-      rank</li>
+      rank. Every snippet caption carries both P(class) and the genuineness
+      score s, and each class page states its acceptance cutoff on s (the
+      stored global threshold, or the class's own in per-class mode) — the
+      border is green exactly when s clears that cutoff and the argmax is the
+      right class, so P-ranked grids can legitimately interleave green and
+      red: a window can be "more of a circle" yet lose more mass to
+      hard_negative than a weaker circle that lost its mass to torus</li>
     </ul>
   </div>
 
