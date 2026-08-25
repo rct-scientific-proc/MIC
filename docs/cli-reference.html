@@ -1218,6 +1218,20 @@ policy      autoaugment (ImageNet policy, no params)
   (gzip-compressed) stream slowly — rewrite them with
   <code>optimize_h5.py</code>, or simply regenerate.</p>
 
+  <h3>tests/make_geotiffs.py — georeferenced labelling targets</h3>
+  <p class="syn"><code>python tests/make_geotiffs.py [--out-dir DIR --count N
+  --size S --seed K]</code> — generates GeoTIFFs (requires rasterio; not a
+  core dependency) of noisy gray scenes scattered with simple shapes —
+  circle, square, triangle, ring (a natural hard-negative foil for the
+  circle) — all drawn in one muted color family so geometry, not color, is
+  the class signal. EPSG:3857 georeferencing at a 0.01 m pixel with
+  per-image origins on a grid; plain-PIL-readable, so
+  <code>inference.py</code> opens them directly. A
+  <code>manifest.json</code> records every drawn shape and position for
+  cross-checking labels. Intended loop: label in GeoLabeller, export
+  gt.json, build the h5, train, then run <code>inference.py --gt</code> over
+  the same images.</p>
+
   <h3>optimize_h5.py — rewrite any h5 for fast loading</h3>
   <p class="syn"><code>python optimize_h5.py in.h5 out.h5 [--resize 224]
   [--compression none|gzip|lzf]</code> — rewrites any h5 in the project layout
