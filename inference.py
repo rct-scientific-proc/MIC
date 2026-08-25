@@ -316,6 +316,7 @@ def gt_analytics(results, classes, hn_index: int, operating,
             entries.append({"row": r_, "pc": pc,
                             "rank": 1 + int((comp > pc).sum()),
                             "total": len(comp),
+                            "in_pool": r_["pred"] == c,
                             "correct": r_["accepted"] and r_["pred"] == c})
         entries.sort(key=lambda e: e["rank"])
         if entries:
@@ -725,11 +726,16 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                                f"windows classified '{cname}' - red near the "
                                "top of the ranking means confident misses; "
                                "red near the bottom means the threshold, not "
-                               "the classifier.", size=8.5)
+                               "the classifier. Windows whose argmax was "
+                               "another class are not in that pool; they "
+                               "follow it, labelled with the class they were "
+                               "called instead.", size=8.5)
                 crops = [_bordered(crop_of(e["row"]), e["correct"])
                          for e in chunk]
-                caps = [f"rank {e['rank']}/{e['total']}\n"
-                        f"P={e['pc']:.3f}" for e in chunk]
+                caps = [(f"rank {e['rank']}/{e['total']}"
+                         if e["in_pool"] else
+                         f"not in pool: argmax {classes[e['row']['pred']]}")
+                        + f"\nP={e['pc']:.3f}" for e in chunk]
                 png = assets / f"gt_should_{c}_{start}.png"
                 plot_sample_grid(
                     crops, caps,

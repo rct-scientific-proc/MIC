@@ -1111,7 +1111,10 @@ policy      autoaugment (ImageNet policy, no params)
       covering a GT point, captioned with its confidence rank among all
       windows classified toward that class (e.g. "rank 2/29"), green when it
       passed the threshold with the right class, red when missed — makes the
-      miss mode (e.g. off-center windows) visible at a glance</li>
+      miss mode (e.g. off-center windows) visible at a glance. Windows whose
+      argmax was a <em>different</em> class are not in that pool; they follow
+      it labelled "not in pool: argmax X" rather than with an out-of-range
+      rank</li>
     </ul>
   </div>
 
