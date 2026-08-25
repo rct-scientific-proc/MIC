@@ -1082,7 +1082,27 @@ policy      autoaugment (ImageNet policy, no params)
       a silent miss is the worst case to hide</li>
       <li>GT columns in the report summary (points hit, FP windows), an
       overall hit rate, and per-image missed-point tables</li>
+      <li>a <strong>Ground-truth metrics</strong> page: specificity at 85 / 90 /
+      95 / 98% recall (over all windows; positive = window covers a known GT
+      point, score = genuineness s, with the achieved threshold per row —
+      directly comparable to the stored operating threshold), false positives
+      per image with mean and standard deviation, and per-class ROC curves
+      (score = P(class), positive = window covers a point of the class)</li>
+      <li><strong>top-N snippet grids per class</strong> (<code>--top-n</code>):
+      the highest-P(class) windows across all images, green-bordered when
+      accepted AND sitting on a GT point of that class</li>
+      <li><strong>should-have-caught grids per class</strong>: every window
+      covering a GT point, captioned with its confidence rank among all
+      windows classified toward that class (e.g. "rank 2/29"), green when it
+      passed the threshold with the right class, red when missed — makes the
+      miss mode (e.g. off-center windows) visible at a glance</li>
     </ul>
+  </div>
+
+  <div class="arg" id="i-top-n">
+    <div class="arg-head"><span class="flag">--top-n</span><span class="badge">int</span><span class="badge">default: 10</span></div>
+    <p>With <code>--gt</code>: how many windows each per-class top-N grid
+    shows.</p>
   </div>
 
   <div class="arg" id="i-grayscale">

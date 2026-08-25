@@ -24,19 +24,21 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 from pathlib import Path
 
 import numpy as np
 import torch
 from fpdf import FPDF
 from PIL import Image, ImageDraw
+from torchmetrics.functional.classification import binary_auroc, binary_roc
 from tqdm import tqdm
 
 from checkpoints import find_checkpoint, utc_stamp
 from dataset import build_transform
 from metrics import _per_sample_thresholds, genuineness_scores, non_hn_argmax
 from model import build_model
-from plots import SERIES
+from plots import SERIES, plot_per_class_rocs, plot_sample_grid
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 MAX_TABLE_ROWS = 40  # per-image detection rows shown in the PDF
@@ -78,6 +80,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "when an accepted window of the same class contains "
                         "it. Adds gt_results.csv, hit/miss markers on the "
                         "overlays, and GT columns to the report")
+    p.add_argument("--top-n", type=int, default=10,
+                   help="with --gt: size of the per-class top-N snippet "
+                        "grids in the report")
     p.add_argument("--out-dir", default=None,
                    help="default: inference_<UTCstamp>/")
     p.add_argument("--no-report", action="store_true",
@@ -187,15 +192,16 @@ def window_positions(size: int, window: int, stride: int) -> list[int]:
 
 @torch.no_grad()
 def infer_image(img: np.ndarray, model, transform, device, args,
-                hn_index: int, operating, desc: str) -> tuple[list[dict], int]:
-    """Slide over one image (HWC uint8); returns (accepted windows, n_windows).
+                desc: str) -> tuple[list[tuple], np.ndarray, int, int]:
+    """Slide over one image (HWC uint8); returns (coords, probs, w, h) for
+    EVERY window — acceptance is decided by the caller, so ground-truth
+    analytics can rank rejected windows too.
 
     Throughput notes: every window in an image has identical dimensions, so
     a whole batch of raw uint8 crops is shipped to the device in one pinned
     non-blocking transfer (~12x less PCIe traffic than fp32 224x224) and the
     resize/scale/normalize transform runs batched on the device; the forward
-    pass runs under autocast on CUDA. Decisions are identical to the
-    unbatched path — probabilities are always computed in fp32.
+    pass runs under autocast on CUDA. Probabilities are computed in fp32.
     """
     ih, iw = img.shape[:2]
     w = min(args.window_width, iw)
@@ -205,7 +211,7 @@ def infer_image(img: np.ndarray, model, transform, device, args,
     use_cuda = device.type == "cuda"
     amp = use_cuda and not getattr(args, "no_amp", False)
 
-    detections: list[dict] = []
+    chunks = []
     bar = tqdm(range(0, len(coords), args.batch_size), desc=desc, unit="batch",
                leave=False, disable=args.no_progress)
     for start in bar:
@@ -219,22 +225,144 @@ def infer_image(img: np.ndarray, model, transform, device, args,
             t = t.expand(-1, 3, -1, -1)
         with torch.amp.autocast(device_type=device.type, enabled=amp):
             logits = model(transform(t))
-        probs = torch.softmax(logits.float(), dim=1).cpu().numpy()
+        chunks.append(torch.softmax(logits.float(), dim=1).cpu().numpy())
+    probs = np.concatenate(chunks) if chunks else np.zeros((0, 1))
+    return coords, probs, w, h
 
-        scores = genuineness_scores(probs, hn_index)
+
+def detections_from(coords, probs, w: int, h: int, hn_index: int,
+                    operating) -> list[dict]:
+    """Accepted windows under the stored operating point."""
+    if not len(coords):
+        return []
+    s = genuineness_scores(probs, hn_index)
+    pred = non_hn_argmax(probs, hn_index)
+    accepted = s >= _per_sample_thresholds(operating, pred, probs.shape[1])
+    return [{"x": x, "y": y, "w": w, "h": h, "class_index": int(pred[i]),
+             "score": float(s[i])}
+            for i, (x, y) in enumerate(coords) if accepted[i]]
+
+
+SPEC_AT_RECALL_TARGETS = (0.85, 0.90, 0.95, 0.98)
+
+
+def gt_analytics(results, classes, hn_index: int, operating,
+                 top_n: int) -> dict | None:
+    """Cross-image ground-truth analytics over EVERY window (accepted or
+    not): per-class top-N classifications, should-have-caught windows with
+    confidence ranks, per-class ROC data, specificity at fixed recalls, and
+    false-positive statistics."""
+    K = len(classes)
+    rows, fp_counts = [], []
+    for ri, r in enumerate(results):
+        if r.get("gt") is None or r.get("probs") is None:
+            continue
+        fp_counts.append(r["gt"]["fp_windows"])
+        probs = r["probs"]
+        if not len(probs):
+            continue
+        s = genuineness_scores(probs, hn_index)
         pred = non_hn_argmax(probs, hn_index)
-        accepted = scores >= _per_sample_thresholds(operating, pred,
-                                                    probs.shape[1])
-        for i, (x, y) in enumerate(batch_coords):
-            if accepted[i]:
-                detections.append({"x": x, "y": y, "w": w, "h": h,
-                                   "class_index": int(pred[i]),
-                                   "score": float(scores[i])})
-    return detections, len(coords)
+        accepted = s >= _per_sample_thresholds(operating, pred, K)
+        pts = [p for p in r["gt"]["points"] if p["known"]]
+        w, h = r["wh"]
+        for i, (x, y) in enumerate(r["coords"]):
+            covers = {p["class"] for p in pts
+                      if x <= p["x"] < x + w and y <= p["y"] < y + h}
+            rows.append({"img": ri, "x": int(x), "y": int(y), "w": w, "h": h,
+                         "s": float(s[i]), "pred": int(pred[i]),
+                         "probs": probs[i], "accepted": bool(accepted[i]),
+                         "covers": covers})
+    if not rows:
+        return None
+
+    out = {"fp_counts": fp_counts, "fp_mean": float(np.mean(fp_counts)),
+           "fp_std": float(np.std(fp_counts))}
+
+    # per-class competitor pools: windows classified toward c, by P(c) desc
+    pools = {}
+    for c in range(K):
+        if c == hn_index:
+            continue
+        mine = sorted((r_ for r_ in rows if r_["pred"] == c),
+                      key=lambda r_: -float(r_["probs"][c]))
+        pools[c] = mine
+    out["topn"] = {c: pool[:top_n] for c, pool in pools.items() if pool}
+
+    # should-have-caught: windows on a class-c GT point, ranked by P(c)
+    # among the class's competitor pool
+    should = {}
+    for c in range(K):
+        if c == hn_index:
+            continue
+        cname = classes[c]
+        comp = np.array([float(r_["probs"][c]) for r_ in pools[c]])
+        entries = []
+        for r_ in rows:
+            if cname not in r_["covers"]:
+                continue
+            pc = float(r_["probs"][c])
+            entries.append({"row": r_, "pc": pc,
+                            "rank": 1 + int((comp > pc).sum()),
+                            "total": len(comp),
+                            "correct": r_["accepted"] and r_["pred"] == c})
+        entries.sort(key=lambda e: e["rank"])
+        if entries:
+            should[c] = entries
+    out["should"] = should
+
+    # per-class ROC: score P(c), positive = window covers a class-c point
+    rocs = {}
+    for c in range(K):
+        if c == hn_index:
+            continue
+        cname = classes[c]
+        y_true = np.array([cname in r_["covers"] for r_ in rows])
+        if y_true.any() and not y_true.all():
+            sc = torch.tensor([float(r_["probs"][c]) for r_ in rows])
+            yt = torch.tensor(y_true.astype(np.int64))
+            fpr, tpr, _ = binary_roc(sc, yt)
+            rocs[cname] = (fpr.numpy(), tpr.numpy(),
+                           float(binary_auroc(sc, yt)))
+    out["rocs"] = rocs
+
+    # specificity at fixed recalls: positive = covers any known GT point,
+    # score = genuineness s (the operating dimension)
+    pos = np.array([bool(r_["covers"]) for r_ in rows])
+    sarr = np.array([r_["s"] for r_ in rows])
+    spec_tbl = []
+    if pos.any() and (~pos).any():
+        ps = np.sort(sarr[pos])[::-1]
+        neg = sarr[~pos]
+        for target in SPEC_AT_RECALL_TARGETS:
+            k = min(len(ps) - 1, max(0, math.ceil(target * len(ps)) - 1))
+            t = float(ps[k])
+            spec_tbl.append({"target": target, "threshold": t,
+                             "recall": float((sarr[pos] >= t).mean()),
+                             "specificity": float((neg < t).mean())})
+    out["spec_at_recall"] = spec_tbl
+    return out
 
 
 HIT_COLOR = "#0ca30c"    # status good
 MISS_COLOR = "#d03b3b"   # status critical
+HIT_RGB = (12, 163, 12)
+MISS_RGB = (208, 59, 59)
+
+
+def _bordered(crop: np.ndarray, ok: bool) -> np.ndarray:
+    """Copy of a window crop with a green (correct) / red border."""
+    arr = np.ascontiguousarray(crop)
+    if arr.shape[-1] == 1:
+        arr = np.repeat(arr, 3, axis=2)
+    arr = arr.copy()
+    color = np.array(HIT_RGB if ok else MISS_RGB, dtype=np.uint8)
+    bw = max(3, min(arr.shape[:2]) // 30)
+    arr[:bw] = color
+    arr[-bw:] = color
+    arr[:, :bw] = color
+    arr[:, -bw:] = color
+    return arr
 
 
 def draw_overlay(img: np.ndarray, detections: list[dict], classes,
@@ -326,7 +454,7 @@ def _image(pdf, path, w=None):
 
 
 def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
-              ckpt_path, args) -> Path:
+              ckpt_path, args, analytics: dict | None = None) -> Path:
     pdf = _Pdf(orientation="P", unit="mm", format="A4")
     pdf.set_auto_page_break(auto=True, margin=16)
     pdf.add_page()
@@ -349,6 +477,10 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                    f"({n_hit / max(n_scored, 1):.1%}), {n_fp} false-positive "
                    "windows across matched images. Overlays mark hits green, "
                    "misses red.")
+        if analytics:
+            _para(pdf, f"false positives per image: mean "
+                       f"{analytics['fp_mean']:.2f}, std "
+                       f"{analytics['fp_std']:.2f}")
 
     if has_gt:
         _table(pdf, ["image", "size", "windows", "detections", "gt hit", "FP win"],
@@ -367,6 +499,86 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                                    for d in r["detections"]})) or "-"]
                 for r in results],
                widths=[pdf.epw * w for w in (0.34, 0.14, 0.12, 0.13, 0.27)])
+
+    if analytics:
+        assets = out_dir / "assets"
+        img_cache: dict = {}
+
+        def crop_of(row) -> np.ndarray:
+            ri = row["img"]
+            if ri not in img_cache:
+                pil = Image.open(results[ri]["path"]).convert(
+                    "L" if args.grayscale else "RGB")
+                arr = np.asarray(pil)
+                img_cache[ri] = arr[:, :, None] if arr.ndim == 2 else arr
+            a = img_cache[ri]
+            return a[row["y"]:row["y"] + row["h"], row["x"]:row["x"] + row["w"]]
+
+        pdf.add_page()
+        _h1(pdf, "Ground-truth metrics")
+        if analytics["spec_at_recall"]:
+            _para(pdf, "Specificity at fixed recall over all windows "
+                       "(positive = window covers a known GT point; score = "
+                       "genuineness s):")
+            _table(pdf, ["target recall", "achieved recall", "specificity",
+                         "threshold"],
+                   [[f"{row['target']:.0%}", f"{row['recall']:.4f}",
+                     f"{row['specificity']:.4f}", f"{row['threshold']:.4f}"]
+                    for row in analytics["spec_at_recall"]],
+                   widths=[pdf.epw * v for v in (0.25, 0.25, 0.25, 0.25)])
+        _para(pdf, f"false positives per image: counts "
+                   f"{analytics['fp_counts']}, mean {analytics['fp_mean']:.2f}, "
+                   f"std {analytics['fp_std']:.2f}")
+        if analytics["rocs"]:
+            roc_png = assets / "gt_roc.png"
+            dropped = plot_per_class_rocs(analytics["rocs"], roc_png)
+            _image(pdf, roc_png, w=pdf.epw * 0.8)
+            _para(pdf, "Per-class ROC over all windows: score = P(class), "
+                       "positive = window covers a GT point of the class."
+                       + (f" Omitted: {', '.join(dropped)}." if dropped else ""),
+                  size=8.5)
+
+        for c, pool in sorted(analytics["topn"].items()):
+            pdf.add_page()
+            cname = classes[c]
+            _h1(pdf, f"Top {len(pool)} '{cname}' classifications")
+            crops = [_bordered(crop_of(r_),
+                               r_["accepted"] and cname in r_["covers"])
+                     for r_ in pool]
+            caps = [f"{results[r_['img']]['path'].stem}\n"
+                    f"P={float(r_['probs'][c]):.3f}"
+                    + (" ACC" if r_["accepted"] else "") for r_ in pool]
+            png = assets / f"gt_top_{c}.png"
+            plot_sample_grid(crops, caps,
+                             f"highest P({cname}) windows across all images",
+                             png, ncols=5)
+            _image(pdf, png)
+            _para(pdf, "green border = accepted AND sits on a ground-truth "
+                       f"{cname} point; red = not.", size=8.5)
+
+        for c, entries in sorted(analytics["should"].items()):
+            cname = classes[c]
+            total = entries[0]["total"] if entries else 0
+            for start in range(0, len(entries), 20):
+                chunk = entries[start:start + 20]
+                pdf.add_page()
+                _h1(pdf, f"'{cname}' windows on GT points"
+                         + (f" ({start + 1}-{start + len(chunk)} of "
+                            f"{len(entries)})" if len(entries) > 20 else ""))
+                crops = [_bordered(crop_of(e["row"]), e["correct"])
+                         for e in chunk]
+                caps = [f"rank {e['rank']}/{e['total']}\n"
+                        f"P={e['pc']:.3f}" for e in chunk]
+                png = assets / f"gt_should_{c}_{start}.png"
+                plot_sample_grid(
+                    crops, caps,
+                    f"every window covering a {cname} GT point, ranked by "
+                    f"P({cname}) among the {total} windows classified {cname}",
+                    png, ncols=5)
+                _image(pdf, png)
+                _para(pdf, "green border = passed the threshold and was "
+                           f"classified {cname}; red = missed (rejected or "
+                           "classified as something else).", size=8.5)
 
     for r in flagged:
         pdf.add_page()
@@ -441,10 +653,10 @@ def main(argv=None) -> None:
         img = np.asarray(pil)
         if img.ndim == 2:
             img = img[:, :, None]
-        detections, n_windows = infer_image(
-            img, model, transform, device, args, hn_index, operating,
-            desc=path.name)
-        r = {"path": path, "size": pil.size, "n_windows": n_windows,
+        coords, probs, w, h = infer_image(img, model, transform, device,
+                                          args, desc=path.name)
+        detections = detections_from(coords, probs, w, h, hn_index, operating)
+        r = {"path": path, "size": pil.size, "n_windows": len(coords),
              "detections": detections, "overlay": None, "gt": None}
 
         if gt_lookup is not None:
@@ -454,6 +666,8 @@ def main(argv=None) -> None:
                 r["gt"] = evaluate_gt(entry, pil.size[0], pil.size[1],
                                       detections, classes)
                 gt_matched += 1
+                # keep every window's probabilities for the GT analytics
+                r["coords"], r["probs"], r["wh"] = coords, probs, (w, h)
 
         misses = (r["gt"] is not None
                   and r["gt"]["n_hit"] < r["gt"]["n_scored"])
@@ -469,12 +683,22 @@ def main(argv=None) -> None:
             if r["gt"]["unknown_classes"]:
                 gt_txt += (" (unknown classes: "
                            + ", ".join(r["gt"]["unknown_classes"]) + ")")
-        print(f"{path.name}: {n_windows} windows, {len(detections)} detections"
+        print(f"{path.name}: {len(coords)} windows, {len(detections)} detections"
               + gt_txt + ("  <- flagged" if (detections or misses) else ""))
 
+    analytics = None
     if gt_lookup is not None:
         print(f"ground truth: {gt_matched}/{len(results)} input images "
               f"matched in {args.gt}")
+        analytics = gt_analytics(results, classes, hn_index, operating,
+                                 args.top_n)
+        if analytics:
+            print(f"false positives per image: mean {analytics['fp_mean']:.2f}, "
+                  f"std {analytics['fp_std']:.2f} "
+                  f"(counts: {analytics['fp_counts']})")
+            for row in analytics["spec_at_recall"]:
+                print(f"  specificity at {row['target']:.0%} recall: "
+                      f"{row['specificity']:.4f} (threshold {row['threshold']:.4f})")
 
     with open(out_dir / "detections.csv", "w", newline="") as f:
         writer = csv.writer(f)
@@ -500,7 +724,8 @@ def main(argv=None) -> None:
                         int(p["known"])])
 
     if not args.no_report:
-        pdf_path = build_pdf(out_dir, results, classes, hn_index, ckpt_path, args)
+        pdf_path = build_pdf(out_dir, results, classes, hn_index, ckpt_path,
+                             args, analytics=analytics)
         print(f"report: {pdf_path}")
     print(f"outputs written to {out_dir}")
 
