@@ -165,9 +165,33 @@ def main() -> None:
     Image.fromarray(scene).save(scenes / "scene.png")
     Image.fromarray(noisy(152, 400, 400)).save(scenes / "clean.png")
 
+    # ground truth in the GeoLabelling export schema: patch centres should
+    # hit, a background point and an unknown class should not
+    import json
+    gt = {
+        "version": "3.2", "classes": ["band0", "band4", "mystery"],
+        "images": [{
+            "path": "D:\\labeller\\scene.png", "name": "scene",
+            "group": "t", "original_width": 512, "original_height": 512,
+            "labels": [
+                {"id": 1, "class_name": "band0", "pixel_x": 128 / 512,
+                 "pixel_y": 128 / 512},
+                {"id": 2, "class_name": "band4", "pixel_x": 364 / 512,
+                 "pixel_y": 314 / 512},
+                {"id": 3, "class_name": "band0", "pixel_x": 480 / 512,
+                 "pixel_y": 40 / 512},
+                {"id": 4, "class_name": "mystery", "pixel_x": 0.02,
+                 "pixel_y": 0.02},
+            ]}],
+        "_next_id": 5,
+    }
+    gt_path = OUT_ROOT / "gt.json"
+    gt_path.write_text(json.dumps(gt))
+
     out_inf = OUT_ROOT / "inference"
     run(REPO / "inference.py", out_sm, scenes, "--window-width", "128",
-        "--window-height", "128", "--stride-x", "64", "--out-dir", out_inf, *GPU)
+        "--window-height", "128", "--stride-x", "64", "--gt", gt_path,
+        "--out-dir", out_inf, *GPU)
     det = list(csv.DictReader(open(out_inf / "detections.csv")))
     assert det, "no detections on the planted scene"
     assert all("clean.png" not in r["image"] for r in det), \
@@ -176,6 +200,15 @@ def main() -> None:
     assert list(out_inf.glob("report_*.pdf")), "missing inference PDF report"
     print("inference detections:",
           [(r["class"], r["x"], r["y"]) for r in det])
+
+    gt_rows = {int(r["label_id"]): r
+               for r in csv.DictReader(open(out_inf / "gt_results.csv"))}
+    assert len(gt_rows) == 4
+    assert any(gt_rows[i]["hit"] == "1" for i in (1, 2)), \
+        "no planted gt point was hit"
+    assert gt_rows[3]["hit"] == "0", "background gt point counted as hit"
+    assert gt_rows[4]["known_class"] == "0", "unknown class not flagged"
+    print("gt hits:", {i: gt_rows[i]["hit"] for i in sorted(gt_rows)})
 
     # optimize_h5: repack + pre-resize to model size, then train an epoch on
     # the resized file (exercises the skip-resize dataset path)

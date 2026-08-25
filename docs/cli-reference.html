@@ -1061,6 +1061,30 @@ policy      autoaugment (ImageNet policy, no params)
     non-overlapping count).</p>
   </div>
 
+  <div class="arg" id="i-gt">
+    <div class="arg-head"><span class="flag">--gt</span><span class="badge">path (.json)</span><span class="badge">default: none</span></div>
+    <p>Ground-truth JSON in the GeoLabelling export schema: an
+    <code>images[]</code> array whose entries carry point <code>labels</code>
+    with <code>class_name</code> and normalized <code>pixel_x</code> /
+    <code>pixel_y</code> (absolute-pixel exports are auto-detected and
+    normalized via <code>original_width/height</code>). Entries are matched to
+    input images by <strong>filename</strong> (name/stem/basename,
+    case-insensitive) since export paths come from the labelling machine.</p>
+    <p>Scoring: a point counts as <strong>HIT</strong> when an accepted window
+    of the same class contains it; detections covering no same-class point
+    count as false-positive windows. Points whose class the model doesn't
+    know are flagged and excluded from the hit rate. Adds:</p>
+    <ul>
+      <li><code>gt_results.csv</code> — one row per point: image, id, class,
+      pixel position, hit, best covering-window score, known-class flag</li>
+      <li>hit/miss markers on the overlays (green circle = hit, red = miss),
+      and pages for images with misses even when they have zero detections —
+      a silent miss is the worst case to hide</li>
+      <li>GT columns in the report summary (points hit, FP windows), an
+      overall hit rate, and per-image missed-point tables</li>
+    </ul>
+  </div>
+
   <div class="arg" id="i-grayscale">
     <div class="arg-head"><span class="flag">--grayscale</span><span class="badge">switch</span><span class="badge">default: off (RGB)</span></div>
     <p>Convert images to grayscale before windowing (channel-repeated to 3 for
