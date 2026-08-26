@@ -1131,8 +1131,10 @@ policy      autoaugment (ImageNet policy, no params)
       counts, with the FP mean and standard deviation in the intro line —
       the reference table lives at the end so the diagnostic pages come
       first (without <code>--gt</code> the summary table stays on the
-      cover). Long filenames are middle-ellipsized to fit their table
-      column and grid captions, keeping both ends of the name</li>
+      cover). Long filenames are never truncated: table cells wrap them
+      onto extra lines, and the top-N grids drop their column count (5
+      down to 1) so each cell is wide enough for the whole name, paginating
+      into extra pages when fewer columns need more rows</li>
     </ul>
   </div>
 

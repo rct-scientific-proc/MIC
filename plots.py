@@ -285,18 +285,41 @@ def plot_controller_timeline(csv_path, path) -> None:
     _save(fig, path)
 
 
+GRID_WIDTH = 9.5  # inches: the widest a sample grid renders in the reports
+
+
+def _caption_cell_width(captions) -> float:
+    """Cell width (inches) needed by the longest caption line at the grid's
+    fontsize-7 caption font (DejaVu Sans averages ~0.058 in per char)."""
+    chars = max((len(ln) for c in captions for ln in str(c).split("\n")),
+                default=0)
+    return max(1.9, chars * 0.058 + 0.3)
+
+
+def grid_ncols(captions, ncols: int = 5) -> int:
+    """Columns (at most ncols) that fit GRID_WIDTH with cells wide enough
+    for the longest caption line — long filenames get fewer, wider columns
+    instead of overlapping their neighbours. Callers that paginate a pool
+    use this to size their per-page chunks to whole rows."""
+    return max(1, min(ncols, int(GRID_WIDTH // _caption_cell_width(captions))))
+
+
 def plot_sample_grid(images: list[np.ndarray], captions: list[str], title: str,
                      path, ncols: int = 4) -> None:
     """Grid of raw dataset thumbnails (uint8 HWC) with per-sample captions —
-    used by the report to show the actual problem samples."""
+    used by the report to show the actual problem samples. Columns drop (and
+    cells widen) when the captions need the room, so entire filenames stay
+    readable."""
     n = len(images)
-    ncols = min(ncols, max(n, 1))
+    ncols = min(grid_ncols(captions, ncols), max(n, 1))
     nrows = (n + ncols - 1) // ncols
     # row height grows with the deepest caption so multi-line labels never
     # collide with the row above
     cap_lines = max((c.count(chr(10)) + 1 for c in captions), default=1)
     row_h = 2.3 + 0.28 * max(0, cap_lines - 2)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(1.9 * ncols, row_h * nrows),
+    cell_w = min(_caption_cell_width(captions), GRID_WIDTH)
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(cell_w * ncols, row_h * nrows),
                              facecolor=SURFACE, squeeze=False)
     for ax in axes.flat:
         ax.set_axis_off()

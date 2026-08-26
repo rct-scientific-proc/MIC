@@ -42,8 +42,8 @@ from checkpoints import find_checkpoint, utc_stamp
 from dataset import build_transform
 from metrics import _per_sample_thresholds, genuineness_scores, non_hn_argmax
 from model import build_model
-from plots import (SERIES, plot_confusion_grid, plot_per_class_rocs,
-                   plot_sample_grid, plot_score_split)
+from plots import (SERIES, grid_ncols, plot_confusion_grid,
+                   plot_per_class_rocs, plot_sample_grid, plot_score_split)
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
@@ -494,27 +494,21 @@ def _txt(s) -> str:
     return str(s).encode("latin-1", "replace").decode("latin-1")
 
 
-def _short(name: str, n: int = 26) -> str:
-    """Middle-ellipsis for long names (filenames often differ at both ends)."""
-    if len(name) <= n:
-        return name
-    head = (n - 3) // 2
-    return name[:head] + "..." + name[-(n - 3 - head):]
-
-
-def _fit(pdf, text: str, w: float) -> str:
-    """Shrink a table cell's text with a middle ellipsis until it fits the
-    column (fpdf cells don't wrap; long filenames would overrun neighbours)."""
+def _wrap_cell(pdf, text, w: float) -> list[str]:
+    """Split a table cell's text into lines that fit the column — long
+    filenames wrap mid-name (they carry no spaces) so the whole name stays
+    readable instead of overrunning the neighbouring cells."""
     text = _txt(text)
     if pdf.get_string_width(text) <= w - 2:
-        return text
-    n = len(text)
-    while n > 8:
-        n -= 2
-        candidate = _short(text, n)
-        if pdf.get_string_width(candidate) <= w - 2:
-            return candidate
-    return _short(text, 8)
+        return [text]
+    lines, cur = [], ""
+    for ch in text:
+        if cur and pdf.get_string_width(cur + ch) > w - 2:
+            lines.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    return lines + [cur]
 
 
 def _h1(pdf, text):
@@ -582,11 +576,18 @@ def _table(pdf, headers, rows, widths):
     pdf.set_draw_color(*LINE)
     pdf.set_fill_color(*PLANE)
     for i, row in enumerate(rows):
-        if pdf.get_y() > pdf.page_break_trigger - 8:
+        cells = [_wrap_cell(pdf, v, wd) for v, wd in zip(row, widths)]
+        depth = max(len(c) for c in cells)
+        if pdf.get_y() + 5.4 * depth > pdf.page_break_trigger:
             pdf.add_page()
-        for v, wd in zip(row, widths):
-            pdf.cell(wd, 5.4, _fit(pdf, v, wd), border="B", fill=(i % 2 == 1))
-        pdf.ln()
+        y = pdf.get_y()
+        x = pdf.l_margin
+        for c, wd in zip(cells, widths):
+            pdf.set_xy(x, y)
+            pdf.multi_cell(wd, 5.4, "\n".join(c + [""] * (depth - len(c))),
+                           border="B", fill=(i % 2 == 1))
+            x += wd
+        pdf.set_xy(pdf.l_margin, y + 5.4 * depth)
     pdf.ln(1.5)
 
 
@@ -801,18 +802,27 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                                else "near" if cname in r_["covers"]
                                else "bad")
                      for r_ in pool]
-            caps = [f"{_short(results[r_['img']]['path'].stem)}\n"
+            caps = [f"{results[r_['img']]['path'].stem}\n"
                     f"P={float(r_['probs'][c]):.3f} s={r_['s']:.3f}"
                     + (" ACC" if r_["accepted"] else "") for r_ in pool]
-            png = assets / f"gt_top_{c}.png"
-            plot_sample_grid(crops, caps,
-                             f"highest P({cname}) windows across all images",
-                             png, ncols=5)
-            _image(pdf, png)
-            _para(pdf, "green border = accepted AND on a ground-truth "
-                       f"{cname} point; yellow = on a {cname} point but "
-                       "rejected by the threshold; red = not on a "
-                       f"{cname} point.", size=8.5)
+            # long filenames drop the column count; paginate in whole rows
+            nc = grid_ncols(caps)
+            per_page = nc * 4
+            for start in range(0, len(pool), per_page):
+                if start:
+                    pdf.add_page()
+                stop = min(start + per_page, len(pool))
+                rng = (f" ({start + 1}-{stop} of {len(pool)})"
+                       if len(pool) > per_page else "")
+                png = assets / f"gt_top_{c}_{start}.png"
+                plot_sample_grid(crops[start:stop], caps[start:stop],
+                                 f"highest P({cname}) windows across all "
+                                 f"images{rng}", png, ncols=nc)
+                _image(pdf, png)
+                _para(pdf, "green border = accepted AND on a ground-truth "
+                           f"{cname} point; yellow = on a {cname} point but "
+                           "rejected by the threshold; red = not on a "
+                           f"{cname} point.", size=8.5)
 
         for c, entries in sorted(analytics["should"].items()):
             cname = classes[c]
