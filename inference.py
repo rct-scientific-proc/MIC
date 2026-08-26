@@ -42,8 +42,8 @@ from checkpoints import find_checkpoint, utc_stamp
 from dataset import build_transform
 from metrics import _per_sample_thresholds, genuineness_scores, non_hn_argmax
 from model import build_model
-from plots import (SERIES, plot_per_class_rocs, plot_sample_grid,
-                   plot_score_split)
+from plots import (SERIES, plot_confusion_grid, plot_per_class_rocs,
+                   plot_sample_grid, plot_score_split)
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
@@ -368,6 +368,39 @@ def gt_analytics(results, classes, hn_index: int, operating,
     out["pos_scores"] = sarr[pos]
     out["neg_scores"] = sarr[~pos]
 
+    # window-level confusion matrices at candidate operating points:
+    # rows = true class of the covered GT point (+ background), columns =
+    # final call (+ hard_negative); a window covering points of two classes
+    # counts once per class
+    genuine = [c for c in range(K) if c != hn_index]
+    gi = {classes[c]: i for i, c in enumerate(genuine)}
+
+    def confusion_at(thr):
+        m = np.zeros((len(genuine) + 1, len(genuine) + 1), dtype=int)
+        for r_ in rows:
+            t = thr[r_["pred"]] if isinstance(thr, dict) else thr
+            call = r_["pred"] if r_["s"] >= t else hn_index
+            col = len(genuine) if call == hn_index else genuine.index(call)
+            if r_["covers"]:
+                for cname in r_["covers"]:
+                    m[gi[cname], col] += 1
+            else:
+                m[len(genuine), col] += 1
+        return m
+
+    if isinstance(operating, dict):
+        stored_label = "stored thresholds (per-class)"
+    else:
+        stored_label = f"stored threshold {operating:.3f}"
+    confusions = [(stored_label, confusion_at(operating))]
+    for row in spec_tbl:
+        confusions.append((f"{row['target']:.0%} recall "
+                           f"(t={row['threshold']:.3f})",
+                           confusion_at(row["threshold"])))
+    out["confusions"] = confusions
+    out["confusion_rows"] = [classes[c] for c in genuine] + ["background"]
+    out["confusion_cols"] = [classes[c] for c in genuine] + ["hard_negative"]
+
     # per-class summary for the cover page
     per_class = []
     for c in range(K):
@@ -538,12 +571,18 @@ def _image(pdf, path, w=None):
     w = w or pdf.epw
     with Image.open(path) as im:
         hgt = w * im.height / im.width
-    if hgt > pdf.eph:  # very tall images: fit to page height instead
-        w = w * pdf.eph / hgt
-        hgt = pdf.eph
+    max_h = pdf.eph - 6  # taller than one page: shrink to fit with slack
+    if hgt > max_h:
+        w = w * max_h / hgt
+        hgt = max_h
     if pdf.get_y() + hgt > pdf.page_break_trigger:
         pdf.add_page()
+    # suspend auto page break while placing: a tall image that grazes the
+    # trigger would otherwise make fpdf insert breaks mid-placement,
+    # leaving orphaned blank pages
+    pdf.set_auto_page_break(False)
     pdf.image(str(path), w=w, x=pdf.l_margin)
+    pdf.set_auto_page_break(True, margin=16)
     pdf.ln(2)
 
 
@@ -701,6 +740,38 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                        + (f" Omitted: {', '.join(dropped)}." if dropped else ""),
                   size=8.5)
 
+        if analytics.get("confusions"):
+            pdf.add_page()
+            _h1(pdf, "Confusion at the stored operating point")
+            _para(pdf, "Window-level confusion matrix: rows are the true "
+                       "class of the GT point a window covers (plus a "
+                       "background row for windows covering none), columns "
+                       "are the final call after the threshold. A window "
+                       "covering points of two classes counts once per "
+                       "class.")
+            stored_png = assets / "gt_confusion_stored.png"
+            plot_confusion_grid(analytics["confusions"][:1],
+                                analytics["confusion_rows"],
+                                analytics["confusion_cols"], stored_png,
+                                ncols=1, scale=1.6)
+            _image(pdf, stored_png)
+
+            if len(analytics["confusions"]) > 1:
+                pdf.add_page()
+                _h1(pdf, "Confusion at fixed-recall thresholds")
+                _para(pdf, "The same matrix re-applied at the thresholds "
+                           "that achieve 85/90/95/98% window recall - watch "
+                           "the hard_negative column drain into the diagonal "
+                           "as the threshold drops. Misses that survive even "
+                           "the lowest threshold are classifier confusion, "
+                           "not the operating point.")
+                recall_png = assets / "gt_confusions_recall.png"
+                plot_confusion_grid(analytics["confusions"][1:],
+                                    analytics["confusion_rows"],
+                                    analytics["confusion_cols"], recall_png,
+                                    ncols=2)
+                _image(pdf, recall_png)
+
         def thr_for(c):
             return operating[c] if isinstance(operating, dict) else operating
 
@@ -764,7 +835,8 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                          for e in chunk]
                 caps = [(f"rank {e['rank']}/{e['total']}"
                          if e["in_pool"] else
-                         f"not in pool: argmax {classes[e['row']['pred']]}")
+                         "not in pool\nargmax "
+                         f"{classes[e['row']['pred']]}")
                         + f"\nP={e['pc']:.3f} s={e['row']['s']:.3f}"
                         for e in chunk]
                 png = assets / f"gt_should_{c}_{start}.png"
@@ -794,7 +866,7 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                            "s (accepted, so s is at or above the cutoff for X).",
                       size=8.5)
             crops = [_bordered(crop_of(r_), False) for r_ in chunk]
-            caps = [f"called {classes[r_['pred']]}, "
+            caps = [f"called {classes[r_['pred']]}\n"
                     f"true {'/'.join(sorted(r_['covers']))}\n"
                     f"P={float(r_['probs'][r_['pred']]):.3f} s={r_['s']:.3f}"
                     for r_ in chunk]
@@ -806,35 +878,39 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
             _image(pdf, png)
 
         rej = analytics["rejected_tp"]
-        for start in range(0, len(rej), 16):
-            chunk = rej[start:start + 16]
-            pdf.add_page()
-            _h1(pdf, "On a GT point but called hard_negative"
-                     + (f" ({start + 1}-{start + len(chunk)} of {len(rej)})"
-                        if len(rej) > 16 else ""))
-            if start == 0:
-                _para(pdf, "Genuine windows the threshold rejected, nearest "
-                           "the operating point first. Correct argmax with a "
-                           "score just under the threshold means the "
-                           "operating point is too strict, not the model. "
-                           "Yellow border = argmax was the right class "
-                           "(threshold miss); red = argmax was wrong too."
-                           + (f" Cutoff: s >= {thr_scalar:.3f} (global)."
-                              if thr_scalar is not None else
-                              " Cutoffs are per-class; see each class page."),
-                      size=8.5)
-            crops = [_bordered(crop_of(r_),
-                               "near" if classes[r_["pred"]] in r_["covers"]
-                               else "bad")
-                     for r_ in chunk]
-            caps = [f"true {'/'.join(sorted(r_['covers']))}, "
-                    f"argmax {classes[r_['pred']]}\ns={r_['s']:.3f}"
-                    for r_ in chunk]
-            png = assets / f"gt_rejected_{start}.png"
-            plot_sample_grid(crops, caps,
-                             "genuine windows rejected by the threshold, "
-                             "nearest the operating point first", png, ncols=5)
-            _image(pdf, png)
+        for c in range(len(classes)):
+            if c == hn_index:
+                continue
+            cname = classes[c]
+            mine = [r_ for r_ in rej if cname in r_["covers"]]
+            for start in range(0, len(mine), 16):
+                chunk = mine[start:start + 16]
+                pdf.add_page()
+                _h1(pdf, f"'{cname}' on a GT point but called hard_negative"
+                         + (f" ({start + 1}-{start + len(chunk)} of "
+                            f"{len(mine)})" if len(mine) > 16 else ""))
+                if start == 0:
+                    _para(pdf, f"Windows on a {cname} GT point that the "
+                               "threshold rejected, nearest the operating "
+                               "point first. Yellow border = argmax was "
+                               f"{cname} (an operating-point miss: correct "
+                               "class, score just under the cutoff); red = "
+                               "argmax was another class (a classifier miss). "
+                               "A window covering points of two classes "
+                               "appears under each."
+                               + cutoff_txt(c), size=8.5)
+                crops = [_bordered(crop_of(r_),
+                                   "near" if r_["pred"] == c else "bad")
+                         for r_ in chunk]
+                caps = [f"true {'/'.join(sorted(r_['covers']))}\n"
+                        f"argmax {classes[r_['pred']]}\ns={r_['s']:.3f}"
+                        for r_ in chunk]
+                png = assets / f"gt_rejected_{c}_{start}.png"
+                plot_sample_grid(crops, caps,
+                                 f"rejected windows covering {cname} points, "
+                                 "nearest the operating point first",
+                                 png, ncols=5)
+                _image(pdf, png)
 
     out_path = out_dir / f"report_{utc_stamp()}.pdf"
     pdf.output(str(out_path))

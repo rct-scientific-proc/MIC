@@ -292,7 +292,11 @@ def plot_sample_grid(images: list[np.ndarray], captions: list[str], title: str,
     n = len(images)
     ncols = min(ncols, max(n, 1))
     nrows = (n + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(1.9 * ncols, 2.3 * nrows),
+    # row height grows with the deepest caption so multi-line labels never
+    # collide with the row above
+    cap_lines = max((c.count(chr(10)) + 1 for c in captions), default=1)
+    row_h = 2.3 + 0.28 * max(0, cap_lines - 2)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(1.9 * ncols, row_h * nrows),
                              facecolor=SURFACE, squeeze=False)
     for ax in axes.flat:
         ax.set_axis_off()
@@ -340,6 +344,54 @@ def plot_score_split(pos_scores, neg_scores, path, threshold=None,
                     facecolor=SURFACE, edgecolor=GRID)
     for text in leg.get_texts():
         text.set_color(INK_2)
+    _save(fig, path)
+
+
+def plot_confusion_grid(entries, row_names, col_names, path,
+                        ncols: int = 2, title: str | None = None,
+                        scale: float = 1.0) -> None:
+    """Confusion matrices (one per candidate operating point):
+    row-normalized shading, raw counts annotated. entries =
+    [(title, matrix), ...] sharing the same row/col labels; scale > 1
+    renders larger cells (e.g. a single full-width matrix)."""
+    n = len(entries)
+    ncols = min(ncols, max(n, 1))
+    nrows = (n + ncols - 1) // ncols
+    k = max(len(row_names), len(col_names))
+    cell = (0.52 * k + 1.7) * scale
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(ncols * cell, nrows * (cell + 0.4)),
+                             facecolor=SURFACE, squeeze=False)
+    cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
+        "seq_blue", [SURFACE, "#cde2fb", "#3987e5", "#0d366b"])
+    for ax in axes.flat:
+        ax.set_axis_off()
+    for ax, (sub_title, cm) in zip(axes.flat, entries):
+        ax.set_axis_on()
+        frac = cm / cm.sum(axis=1, keepdims=True).clip(min=1)
+        ax.imshow(frac, cmap=cmap, vmin=0, vmax=1)
+        fs = 7 * (scale ** 0.5)
+        ax.set_xticks(range(len(col_names)), col_names, rotation=45,
+                      ha="right", fontsize=fs)
+        ax.set_yticks(range(len(row_names)), row_names, fontsize=fs)
+        ax.tick_params(colors=MUTED, length=0)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        for i in range(len(row_names)):
+            for j in range(len(col_names)):
+                if cm[i, j]:
+                    color = SURFACE if frac[i, j] > 0.55 else INK
+                    ax.text(j, i, str(int(cm[i, j])), ha="center",
+                            va="center", fontsize=6.5 * (scale ** 0.5),
+                            color=color)
+        ax.set_title(sub_title, fontsize=9 * (scale ** 0.5), color=INK)
+        ax.set_xlabel("final call", color=INK_2, fontsize=7.5 * (scale ** 0.5))
+        ax.set_ylabel("true (GT)", color=INK_2, fontsize=7.5 * (scale ** 0.5))
+    if title:
+        fig.suptitle(title, fontsize=11, color=INK)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+    else:
+        fig.tight_layout()
     _save(fig, path)
 
 

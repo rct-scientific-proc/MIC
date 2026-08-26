@@ -335,10 +335,19 @@ def _image(pdf, path, w=None):
     from PIL import Image
     w = w or pdf.epw
     with Image.open(path) as im:
-        h = w * im.height / im.width
-    if pdf.get_y() + h > pdf.page_break_trigger:
+        hgt = w * im.height / im.width
+    max_h = pdf.eph - 6  # taller than one page: shrink to fit with slack
+    if hgt > max_h:
+        w = w * max_h / hgt
+        hgt = max_h
+    if pdf.get_y() + hgt > pdf.page_break_trigger:
         pdf.add_page()
+    # suspend auto page break while placing: a tall image that grazes the
+    # trigger would otherwise make fpdf insert breaks mid-placement,
+    # leaving orphaned blank pages
+    pdf.set_auto_page_break(False)
     pdf.image(str(path), w=w, x=pdf.l_margin)
+    pdf.set_auto_page_break(True, margin=16)
     pdf.ln(2)
 
 

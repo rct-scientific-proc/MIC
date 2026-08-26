@@ -1086,7 +1086,7 @@ policy      autoaugment (ImageNet policy, no params)
       <li>an <strong>Operating point</strong> page: a score-separation histogram
       (windows on GT points vs background, log scale) with the stored
       threshold and the fixed-recall thresholds marked — the single chart
-      that shows whether the operating point is too strict</li>
+      that shows whether the operating point is too strict — followed (after the per-class ROC) by <strong>confusion matrices</strong>: a full-width window-level true-class vs final-call matrix at the stored threshold, then a 2x2 page of the same matrix at each fixed-recall threshold, so you can watch the hard_negative column drain into the diagonal as the threshold drops, separating threshold-fixable misses from threshold-invariant class confusion</li>
       <li><code>gt_results.csv</code> — one row per point: image, id, class,
       pixel position, hit, best covering-window score, known-class flag</li>
       <li>hit/miss markers on the overlay PNGs in <code>assets/</code>
@@ -1095,8 +1095,10 @@ policy      autoaugment (ImageNet policy, no params)
       overall hit rate</li>
       <li><strong>failure-mode grids</strong>: windows accepted as the
       <em>wrong</em> genuine class (cross-class confusions, most confident
-      first) and GT-covering windows rejected to hard_negative (nearest the
-      operating threshold first, with true class, argmax, and score) — the
+      first) and GT-covering windows rejected to hard_negative — partitioned into
+      one section per true class, nearest the operating threshold first,
+      each snippet captioned true class / argmax / s on separate lines (a
+      window covering points of two classes appears under each) — the
       two ways a labelled point gets missed, shown as actual snippets</li>
       <li>a <strong>Ground-truth metrics</strong> page: specificity at 85 / 90 /
       95 / 98% recall (over all windows; positive = window covers a known GT
