@@ -394,13 +394,24 @@ HIT_RGB = (12, 163, 12)
 MISS_RGB = (208, 59, 59)
 
 
-def _bordered(crop: np.ndarray, ok: bool) -> np.ndarray:
-    """Copy of a window crop with a green (correct) / red border."""
+BORDER_RGB = {
+    "good": (12, 163, 12),    # correct class, passed the threshold
+    "near": (237, 161, 0),    # correct class, REJECTED by the threshold
+    "bad": (208, 59, 59),     # wrong class
+}
+
+
+def _bordered(crop: np.ndarray, state) -> np.ndarray:
+    """Copy of a window crop with a colored border: green = correct class
+    and accepted, yellow = correct class but rejected by the threshold,
+    red = wrong class. (Booleans map to green/red for back-compat.)"""
+    if isinstance(state, bool):
+        state = "good" if state else "bad"
     arr = np.ascontiguousarray(crop)
     if arr.shape[-1] == 1:
         arr = np.repeat(arr, 3, axis=2)
     arr = arr.copy()
-    color = np.array(HIT_RGB if ok else MISS_RGB, dtype=np.uint8)
+    color = np.array(BORDER_RGB[state], dtype=np.uint8)
     bw = max(3, min(arr.shape[:2]) // 30)
     arr[:bw] = color
     arr[-bw:] = color
@@ -708,7 +719,9 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                        "all images - a healthy model shows a solid green row."
                        + cutoff_txt(c), size=8.5)
             crops = [_bordered(crop_of(r_),
-                               r_["accepted"] and cname in r_["covers"])
+                               "good" if r_["accepted"] and cname in r_["covers"]
+                               else "near" if cname in r_["covers"]
+                               else "bad")
                      for r_ in pool]
             caps = [f"{results[r_['img']]['path'].stem}\n"
                     f"P={float(r_['probs'][c]):.3f} s={r_['s']:.3f}"
@@ -718,8 +731,10 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                              f"highest P({cname}) windows across all images",
                              png, ncols=5)
             _image(pdf, png)
-            _para(pdf, "green border = accepted AND sits on a ground-truth "
-                       f"{cname} point; red = not.", size=8.5)
+            _para(pdf, "green border = accepted AND on a ground-truth "
+                       f"{cname} point; yellow = on a {cname} point but "
+                       "rejected by the threshold; red = not on a "
+                       f"{cname} point.", size=8.5)
 
         for c, entries in sorted(analytics["should"].items()):
             cname = classes[c]
@@ -742,7 +757,10 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                                "called instead." + cutoff_txt(c)
                                + " Green = s at or above the cutoff AND "
                                f"argmax {cname}.", size=8.5)
-                crops = [_bordered(crop_of(e["row"]), e["correct"])
+                crops = [_bordered(crop_of(e["row"]),
+                                   "good" if e["correct"]
+                                   else "near" if e["in_pool"]
+                                   else "bad")
                          for e in chunk]
                 caps = [(f"rank {e['rank']}/{e['total']}"
                          if e["in_pool"] else
@@ -757,8 +775,10 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                     png, ncols=5)
                 _image(pdf, png)
                 _para(pdf, "green border = passed the threshold and was "
-                           f"classified {cname}; red = missed (rejected or "
-                           "classified as something else).", size=8.5)
+                           f"classified {cname}; yellow = classified {cname} "
+                           "but rejected by the threshold (an operating-point "
+                           "miss); red = classified as another class (a "
+                           "classifier miss).", size=8.5)
 
         wrong = analytics["wrong_class"]
         for start in range(0, len(wrong), 16):
@@ -796,12 +816,17 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                 _para(pdf, "Genuine windows the threshold rejected, nearest "
                            "the operating point first. Correct argmax with a "
                            "score just under the threshold means the "
-                           "operating point is too strict, not the model."
+                           "operating point is too strict, not the model. "
+                           "Yellow border = argmax was the right class "
+                           "(threshold miss); red = argmax was wrong too."
                            + (f" Cutoff: s >= {thr_scalar:.3f} (global)."
                               if thr_scalar is not None else
                               " Cutoffs are per-class; see each class page."),
                       size=8.5)
-            crops = [_bordered(crop_of(r_), False) for r_ in chunk]
+            crops = [_bordered(crop_of(r_),
+                               "near" if classes[r_["pred"]] in r_["covers"]
+                               else "bad")
+                     for r_ in chunk]
             caps = [f"true {'/'.join(sorted(r_['covers']))}, "
                     f"argmax {classes[r_['pred']]}\ns={r_['s']:.3f}"
                     for r_ in chunk]

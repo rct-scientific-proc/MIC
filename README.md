@@ -37,6 +37,14 @@ python train.py data.h5 --arch resnet18 --epochs 50 --target-recall 0.95 \
     --imbalance-ratio 3.0 --out-dir runs/exp1
 ```
 
+All options can live in a JSON config instead of the command line —
+`python train.py --config exp.json` (keys = long option names, `"h5"` for
+the dataset; explicit CLI flags override the file; see
+`example_config.json` for a ready-to-edit starting point). Every run writes its
+resolved options to `<out-dir>/config.json`, which is itself a valid
+`--config`, so any run can be reproduced or branched from its output
+directory.
+
 Key options (see `python train.py --help` for all):
 
 - `--target-recall` — recall target the threshold sweep must meet.
@@ -104,8 +112,20 @@ stored operating point, and a thumbnail page per class: best predictions,
 worst predictions, and impostors — other labels the model routes to that
 class). `--no-report` skips it; `--report-test`
 uses the test split (opt-in, to keep test honest); regenerate for any past
-run with `python report.py <run_dir> <data.h5>`. No augmentations are
-applied by design.
+run with `python report.py <run_dir> <data.h5>`.
+
+Augmentation is **off by default** and opt-in per transform, with
+per-entry parameters: `--augment rotation:p=0.7,degrees=30
+erasing:p=0.5,scale=0.02-0.2` (train split only; validation/eval/inference
+are never augmented; in a `--config` file, JSON objects like
+`{"name": "erasing", "p": 0.5}` also work). Catalog: rotation,
+perspective, gaussianblur, sharpness, erasing (Random Erasing/Cutout —
+random black rectangle, applied post-resize), colorjitter, grayscale,
+invert, posterize, solarize, autocontrast, equalize, plus the policy-based
+autoaugment / randaugment / trivialaugment. Caution: the photometric ops
+alter intensity — if your classes are intensity-coded they can destroy the
+label; rotation, perspective, gaussianblur, sharpness, and erasing are the
+safer subset there.
 
 ## Offline pretrained weights
 
@@ -144,7 +164,62 @@ stored thresholds, and writes `detections.csv` plus a
 `report_<UTCstamp>.pdf` — a summary of all images and an annotated page
 (raw window boxes, colored per class) for each image containing
 non-hard-negative detections. `--grayscale` for models trained on grayscale
-snippets; `--stride-y` defaults to `--stride-x`.
+snippets; `--stride-y` defaults to `--stride-x`. `--gt labels.json` scores
+detections against a GeoLabelling point-label export (matched by filename):
+a point is hit when a same-class accepted window contains it — adds
+`gt_results.csv`, green/red hit/miss markers on the overlay PNGs, and a
+GT report: a color-coded verdict box and per-class table on the cover, a
+score-separation histogram with the stored and fixed-recall thresholds
+marked, specificity at 85/90/95/98% recall, false positives per image
+with mean/std, per-class ROC curves, and per-class snippet grids: top-N highest-confidence windows
+(`--top-n`), every should-have-caught window ranked by confidence
+("rank 2/29"), cross-class confusions (accepted as the wrong class), and
+GT windows rejected to hard_negative — borders triage the failure mode:
+green = correct and accepted, yellow = right class but under the
+threshold, red = wrong class. Whole-image overlays live in `assets/` as PNGs, not report pages.
+
+## Real public datasets
+
+```
+python tests/make_real_h5.py fashionmnist fashion.h5 --hn-classes 4
+python tests/make_real_h5.py cifar100 cifar.h5 --hn-classes 80 --subset-per-class 200
+```
+
+Downloads a torchvision dataset (mnist / fashionmnist / cifar10 / cifar100,
+cached after the first fetch) and converts it to the h5 format, relabeling a
+random `--hn-classes` subset of the original classes (or an explicit
+`--hn-names` list) as `hard_negative`. More HN classes = closer to this
+pipeline's heavy-imbalance regime.
+
+## Georeferenced test scenes
+
+```
+python tests/make_geotiffs.py    # requires rasterio (test tooling only)
+```
+
+Generates GeoTIFF scenes (EPSG:3857, 0.01 m pixel) of simple shapes —
+circle, square, triangle, ring — in one muted color family so geometry is
+the class signal, with a `manifest.json` of every drawn shape. Label them
+in GeoLabeller, export gt.json, build the h5, train, then run
+`inference.py --gt` over the same images to exercise the full loop.
+
+## Optimizing an h5 for loading
+
+```
+python optimize_h5.py in.h5 out.h5                # contiguous, uncompressed
+python optimize_h5.py big_src.h5 out.h5 --resize 224   # + pre-resize
+```
+
+Rewrites any h5 with a contiguous, uncompressed images dataset so every
+per-sample read is a direct offset into the file (~240x faster random reads
+than h5py's default chunking under gzip; pixels byte-identical). All
+project generators now write this layout natively; use this tool on files
+from other sources or older versions. `--resize N` is optional and pays off
+only when sources are larger than the target — for smaller sources it
+inflates the file quadratically (the script warns); files already at model
+size skip the resize op during training/evaluation automatically.
+`--compression gzip|lzf` remains available when disk matters more than
+read speed.
 
 ## Smoke test
 

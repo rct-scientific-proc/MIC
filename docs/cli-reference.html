@@ -1117,10 +1117,12 @@ policy      autoaugment (ImageNet policy, no params)
       rank. Every snippet caption carries both P(class) and the genuineness
       score s, and each class page states its acceptance cutoff on s (the
       stored global threshold, or the class's own in per-class mode) — the
-      border is green exactly when s clears that cutoff and the argmax is the
-      right class, so P-ranked grids can legitimately interleave green and
-      red: a window can be "more of a circle" yet lose more mass to
-      hard_negative than a weaker circle that lost its mass to torus</li>
+      borders triage the failure mode: <strong>green</strong> = right class and
+      past the cutoff, <strong>yellow</strong> = right argmax class but rejected
+      by the threshold (an operating-point miss), <strong>red</strong> = wrong
+      class (a classifier miss, whether accepted or not). A page dominated by
+      yellow says lower the threshold; dominated by red says fix the model or
+      its data</li>
     </ul>
   </div>
 
