@@ -1026,7 +1026,8 @@ policy      autoaugment (ImageNet policy, no params)
   thresholds — a window is a detection when accepted as a genuine class.
   Outputs: <code>detections.csv</code> (every accepted window), a
   <code>report_&lt;UTCstamp&gt;.pdf</code> (summary table of all images plus the
-  ground-truth analytics sections when <code>--gt</code> is given), and
+  ground-truth analytics sections when <code>--gt</code> is given — with GT
+  the per-image table moves to the final page so diagnostics come first), and
   annotated whole-image overlay PNGs in <code>assets/</code> (raw window boxes
   colored per class, GT hit/miss markers) — overlays live as files for
   direct viewing rather than as report pages.</p>
@@ -1103,9 +1104,9 @@ policy      autoaugment (ImageNet policy, no params)
       <li>a <strong>Ground-truth metrics</strong> page: specificity at 85 / 90 /
       95 / 98% recall (over all windows; positive = window covers a known GT
       point, score = genuineness s, with the achieved threshold per row —
-      directly comparable to the stored operating threshold), false positives
-      per image with mean and standard deviation, and per-class ROC curves
-      (score = P(class), positive = window covers a point of the class)</li>
+      directly comparable to the stored operating threshold) and per-class
+      ROC curves (score = P(class), positive = window covers a point of the
+      class)</li>
       <li><strong>top-N snippet grids per class</strong> (<code>--top-n</code>):
       the highest-P(class) windows across all images, green-bordered when
       accepted AND sitting on a GT point of that class</li>
@@ -1125,6 +1126,13 @@ policy      autoaugment (ImageNet policy, no params)
       class (a classifier miss, whether accepted or not). A page dominated by
       yellow says lower the threshold; dominated by red says fix the model or
       its data</li>
+      <li>a final <strong>Per image</strong> page closing the report: every
+      input image with its window, detection, GT-hit and false-positive
+      counts, with the FP mean and standard deviation in the intro line —
+      the reference table lives at the end so the diagnostic pages come
+      first (without <code>--gt</code> the summary table stays on the
+      cover). Long filenames are middle-ellipsized to fit their table
+      column and grid captions, keeping both ends of the name</li>
     </ul>
   </div>
 
@@ -1269,17 +1277,23 @@ policy      autoaugment (ImageNet policy, no params)
 
   <h3>tests/make_geotiffs.py — georeferenced labelling targets</h3>
   <p class="syn"><code>python tests/make_geotiffs.py [--out-dir DIR --count N
-  --size S --seed K]</code> — generates GeoTIFFs (requires rasterio; not a
-  core dependency) of noisy gray scenes scattered with simple shapes —
-  circle, square, triangle, ring (a natural hard-negative foil for the
-  circle) — all drawn in one muted color family so geometry, not color, is
-  the class signal. EPSG:3857 georeferencing at a 0.01 m pixel with
-  per-image origins on a grid; plain-PIL-readable, so
+  --size S --filled-frac F --gt-out GT.json --rename DRAWN=CLASS --seed
+  K]</code> — generates GeoTIFFs (requires rasterio; not a core dependency)
+  of noisy gray scenes; a <code>--filled-frac</code> fraction of them (default:
+  all) is scattered with simple shapes — circle, square, triangle, ring (a
+  natural hard-negative foil for the circle) — all drawn in one muted color
+  family so geometry, not color, is the class signal, while the rest stay
+  pure background, mimicking sparse survey scenes. EPSG:3857 georeferencing
+  at a 0.01 m pixel with per-image origins on a grid; plain-PIL-readable, so
   <code>inference.py</code> opens them directly. A
   <code>manifest.json</code> records every drawn shape and position for
-  cross-checking labels. Intended loop: label in GeoLabeller, export
-  gt.json, build the h5, train, then run <code>inference.py --gt</code> over
-  the same images.</p>
+  cross-checking labels, and <code>--gt-out</code> writes a ready-made
+  ground truth in the GeoLabelling export schema (every image gets an
+  entry; empty images carry an empty labels list), with <code>--rename
+  ring=torus</code>-style mappings to match a model's class names —
+  skipping the manual labelling step entirely for scale tests. Intended
+  loop: label in GeoLabeller (or <code>--gt-out</code>), build the h5,
+  train, then run <code>inference.py --gt</code> over the same images.</p>
 
   <h3>optimize_h5.py — rewrite any h5 for fast loading</h3>
   <p class="syn"><code>python optimize_h5.py in.h5 out.h5 [--resize 224]

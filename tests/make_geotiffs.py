@@ -1,20 +1,27 @@
 """Generate georeferenced test images with simple shapes, for the full
 labelling -> gt.json + h5 -> train -> blind-inference loop.
 
-Each GeoTIFF is a noisy gray background with scattered filled shapes —
-circle, square, triangle, ring (the ring makes a natural hard-negative
-foil for the circle) — drawn in a shared muted color with per-instance
-jitter, so a classifier must learn GEOMETRY, not color. RGB uint8,
-EPSG:3857 georeferencing with a 0.01 m pixel and per-image origins laid
-out on a grid (same scale as the GeoLabelling example export). Written
+Each GeoTIFF is a noisy gray background; a --filled-frac fraction of the
+images additionally carry scattered filled shapes — circle, square,
+triangle, ring (the ring makes a natural hard-negative foil for the
+circle) — drawn in a shared muted color with per-instance jitter, so a
+classifier must learn GEOMETRY, not color. RGB uint8, EPSG:3857
+georeferencing with a 0.01 m pixel and per-image origins laid out on a
+grid (same scale as the GeoLabelling example export). Written
 uncompressed/stripped so plain PIL readers (inference.py) open them too.
 
-A manifest.json records exactly what was drawn where (shape, center pixel,
-size per image) so labels can be cross-checked.
+A manifest.json records exactly what was drawn where. --gt-out
+additionally writes a ready-made ground-truth file in the GeoLabelling
+export schema (every image gets an entry; empty images carry an empty
+labels list), with --rename mapping drawn shape names to the class names a
+model was trained with (e.g. --rename ring=torus).
 
 Requires rasterio (not a core pipeline dependency):
 
     python tests/make_geotiffs.py --out-dir tests/data/geotiffs
+    python tests/make_geotiffs.py --out-dir tests/data/geotiffs_many \\
+        --count 500 --size 512 --filled-frac 0.05 \\
+        --gt-out tests/data/geotiffs_many_gt.json --rename ring=torus
 """
 
 from __future__ import annotations
@@ -53,10 +60,21 @@ def main() -> None:
     p.add_argument("--out-dir", default="tests/data/geotiffs")
     p.add_argument("--count", type=int, default=4, help="number of images")
     p.add_argument("--size", type=int, default=1024, help="image width/height")
+    p.add_argument("--filled-frac", type=float, default=1.0,
+                   help="fraction of images that contain shapes; the rest "
+                        "are pure background (default: all filled)")
     p.add_argument("--min-shapes", type=int, default=6)
     p.add_argument("--max-shapes", type=int, default=12)
     p.add_argument("--shape-size", type=int, nargs=2, default=(40, 80),
                    metavar=("MIN", "MAX"))
+    p.add_argument("--rename", action="append", default=None,
+                   metavar="DRAWN=CLASS",
+                   help="rename a drawn shape in the manifest/gt output, "
+                        "e.g. --rename ring=torus (repeatable)")
+    p.add_argument("--gt-out", default=None, metavar="GT.json",
+                   help="also write a ground-truth file in the GeoLabelling "
+                        "export schema (every image gets an entry; empty "
+                        "images carry an empty labels list)")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
@@ -66,45 +84,59 @@ def main() -> None:
     except ImportError:
         raise SystemExit("this generator needs rasterio: pip install rasterio")
 
+    rename = {}
+    for pair in args.rename or []:
+        drawn, _, final = pair.partition("=")
+        if not final or drawn not in SHAPES:
+            raise SystemExit(f"--rename expects DRAWN=CLASS with DRAWN in "
+                             f"{SHAPES}, got '{pair}'")
+        rename[drawn] = final
+
     rng = np.random.default_rng(args.seed)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     s = args.size
     bg_value = 128
+    grid_cols = max(1, int(math.ceil(math.sqrt(args.count))))
     manifest = {"crs": "EPSG:3857", "pixel_size_m": PIXEL_SIZE, "images": []}
+    gt_images = []
+    label_id = 1
+    n_filled = n_shapes_total = 0
 
     for i in range(args.count):
-        # noisy background, shapes drawn on top
         base = (bg_value + rng.integers(-18, 19, (s, s, 3))).clip(0, 255)
         pil = Image.fromarray(base.astype(np.uint8))
         draw = ImageDraw.Draw(pil)
 
-        n_shapes = int(rng.integers(args.min_shapes, args.max_shapes + 1))
         placed: list[dict] = []
-        attempts = 0
-        while len(placed) < n_shapes and attempts < 500:
-            attempts += 1
-            size = float(rng.integers(args.shape_size[0], args.shape_size[1] + 1))
-            margin = size
-            cx = float(rng.uniform(margin, s - margin))
-            cy = float(rng.uniform(margin, s - margin))
-            if any(math.hypot(cx - q["cx"], cy - q["cy"]) <
-                   (size + q["size"]) * 0.75 for q in placed):
-                continue  # keep shapes separated
-            shape = str(rng.choice(SHAPES))
-            jitter = rng.integers(-12, 13, 3)
-            color = tuple(int(c) for c in
-                          np.clip(np.array([62, 70, 92]) + jitter, 0, 255))
-            draw_shape(draw, shape, cx, cy, size, color,
-                       (bg_value, bg_value, bg_value))
-            placed.append({"shape": shape, "cx": round(cx, 1),
-                           "cy": round(cy, 1), "size": size})
+        if rng.random() < args.filled_frac:
+            target = int(rng.integers(args.min_shapes, args.max_shapes + 1))
+            attempts = 0
+            while len(placed) < target and attempts < 500:
+                attempts += 1
+                size = float(rng.integers(args.shape_size[0],
+                                          args.shape_size[1] + 1))
+                margin = size
+                cx = float(rng.uniform(margin, s - margin))
+                cy = float(rng.uniform(margin, s - margin))
+                if any(math.hypot(cx - q["cx"], cy - q["cy"]) <
+                       (size + q["size"]) * 0.75 for q in placed):
+                    continue  # keep shapes separated
+                shape = str(rng.choice(SHAPES))
+                jitter = rng.integers(-12, 13, 3)
+                color = tuple(int(c) for c in
+                              np.clip(np.array([62, 70, 92]) + jitter, 0, 255))
+                draw_shape(draw, shape, cx, cy, size, color,
+                           (bg_value, bg_value, bg_value))
+                placed.append({"shape": rename.get(shape, shape),
+                               "cx": round(cx, 1), "cy": round(cy, 1),
+                               "size": size})
 
         # grid of per-image origins so images don't overlap geographically
-        col, row = i % 2, i // 2
+        col, row = i % grid_cols, i // grid_cols
         x0 = -50.0 + col * (s * PIXEL_SIZE + 20.0)
         y0 = 295.0 - row * (s * PIXEL_SIZE + 20.0)
-        path = out_dir / f"shapes_{i:02d}.tif"
+        path = out_dir / f"shapes_{i:03d}.tif"
         arr = np.asarray(pil)
         with rasterio.open(
                 path, "w", driver="GTiff", height=s, width=s, count=3,
@@ -112,23 +144,51 @@ def main() -> None:
                 transform=from_origin(x0, y0, PIXEL_SIZE, PIXEL_SIZE)) as dst:
             dst.write(arr.transpose(2, 0, 1))
 
-        Image.open(path).convert("RGB")  # PIL readability (inference.py)
-        counts = {}
-        for q in placed:
-            counts[q["shape"]] = counts.get(q["shape"], 0) + 1
         manifest["images"].append({
             "name": path.stem, "path": str(path), "origin": [x0, y0],
             "shapes": placed})
-        print(f"{path}: {len(placed)} shapes "
-              + ", ".join(f"{v}x {k}" for k, v in sorted(counts.items())))
+
+        labels = []
+        for q in placed:
+            labels.append({
+                "id": label_id, "unique_id": f"gen-{label_id:06d}",
+                "class_name": q["shape"],
+                "pixel_x": q["cx"] / s, "pixel_y": q["cy"] / s,
+                "lon": 0.0, "lat": 0.0,
+                "object_id": f"obj-{label_id:06d}", "group_id": "generated",
+                "geodesic_distance": round(q["size"] * PIXEL_SIZE, 3)})
+            label_id += 1
+        gt_images.append({
+            "path": str(path.resolve()), "name": path.stem,
+            "group": "generated", "labels": labels,
+            "original_width": s, "original_height": s,
+            "reader": {"tif": "default"},
+            "affine_coeffs": [PIXEL_SIZE, 0.0, x0, 0.0, -PIXEL_SIZE, y0],
+            "crs_epsg": 3857})
+
+        if placed:
+            n_filled += 1
+            n_shapes_total += len(placed)
+            counts = {}
+            for q in placed:
+                counts[q["shape"]] = counts.get(q["shape"], 0) + 1
+            print(f"{path.name}: " + ", ".join(f"{v}x {k}"
+                                               for k, v in sorted(counts.items())))
 
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2),
                                            encoding="utf-8")
-    print(f"\nmanifest: {out_dir / 'manifest.json'}")
-    print("next: label these in GeoLabeller, export gt.json, build the h5, "
-          "train, then\n  python inference.py <run_dir> "
-          f"{out_dir} --window-width 128 --window-height 128 --stride-x 64 "
-          "--gt <gt.json>")
+    print(f"\n{args.count} images ({n_filled} with shapes, "
+          f"{n_shapes_total} shapes total) in {out_dir}")
+    print(f"manifest: {out_dir / 'manifest.json'}")
+
+    if args.gt_out:
+        class_names = sorted({q["shape"] for e in manifest["images"]
+                              for q in e["shapes"]})
+        gt = {"version": "3.2", "classes": class_names, "images": gt_images,
+              "_next_id": label_id}
+        Path(args.gt_out).write_text(json.dumps(gt, indent=2),
+                                     encoding="utf-8")
+        print(f"ground truth: {args.gt_out}")
 
 
 if __name__ == "__main__":

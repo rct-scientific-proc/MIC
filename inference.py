@@ -494,6 +494,29 @@ def _txt(s) -> str:
     return str(s).encode("latin-1", "replace").decode("latin-1")
 
 
+def _short(name: str, n: int = 26) -> str:
+    """Middle-ellipsis for long names (filenames often differ at both ends)."""
+    if len(name) <= n:
+        return name
+    head = (n - 3) // 2
+    return name[:head] + "..." + name[-(n - 3 - head):]
+
+
+def _fit(pdf, text: str, w: float) -> str:
+    """Shrink a table cell's text with a middle ellipsis until it fits the
+    column (fpdf cells don't wrap; long filenames would overrun neighbours)."""
+    text = _txt(text)
+    if pdf.get_string_width(text) <= w - 2:
+        return text
+    n = len(text)
+    while n > 8:
+        n -= 2
+        candidate = _short(text, n)
+        if pdf.get_string_width(candidate) <= w - 2:
+            return candidate
+    return _short(text, 8)
+
+
 def _h1(pdf, text):
     pdf.set_font("helvetica", "B", 15)
     pdf.set_text_color(*INK)
@@ -562,7 +585,7 @@ def _table(pdf, headers, rows, widths):
         if pdf.get_y() > pdf.page_break_trigger - 8:
             pdf.add_page()
         for v, wd in zip(row, widths):
-            pdf.cell(wd, 5.4, _txt(v), border="B", fill=(i % 2 == 1))
+            pdf.cell(wd, 5.4, _fit(pdf, v, wd), border="B", fill=(i % 2 == 1))
         pdf.ln()
     pdf.ln(1.5)
 
@@ -665,16 +688,7 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                        "but called hard_negative; AUC = one-vs-rest over all "
                        "windows.", size=8)
 
-        _h2(pdf, "Per image")
-        _table(pdf, ["image", "size", "windows", "detections", "gt hit", "FP win"],
-               [[r["path"].name, f"{r['size'][0]}x{r['size'][1]}",
-                 r["n_windows"], len(r["detections"]),
-                 (f"{r['gt']['n_hit']}/{r['gt']['n_scored']}"
-                  if r["gt"] else "no gt"),
-                 r["gt"]["fp_windows"] if r["gt"] else "-"]
-                for r in results],
-               widths=[pdf.epw * w for w in (0.32, 0.14, 0.13, 0.15, 0.14, 0.12)])
-    else:
+    if not has_gt:
         _table(pdf, ["image", "size", "windows", "detections", "classes found"],
                [[r["path"].name, f"{r['size'][0]}x{r['size'][1]}", r["n_windows"],
                  len(r["detections"]),
@@ -722,13 +736,6 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
             _para(pdf, "positive = window covers a known GT point, score = "
                        "genuineness s; each row's threshold is directly "
                        "comparable to the stored operating threshold.", size=8)
-        _h2(pdf, "False positives per image")
-        _table(pdf, ["image", "FP windows"],
-               [[r["path"].name, r["gt"]["fp_windows"]]
-                for r in results if r["gt"]]
-               + [["mean +/- std", f"{analytics['fp_mean']:.2f} +/- "
-                                   f"{analytics['fp_std']:.2f}"]],
-               widths=[pdf.epw * 0.6, pdf.epw * 0.4])
         if analytics["rocs"]:
             pdf.add_page()
             _h1(pdf, "Per-class ROC")
@@ -794,7 +801,7 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                                else "near" if cname in r_["covers"]
                                else "bad")
                      for r_ in pool]
-            caps = [f"{results[r_['img']]['path'].stem}\n"
+            caps = [f"{_short(results[r_['img']]['path'].stem)}\n"
                     f"P={float(r_['probs'][c]):.3f} s={r_['s']:.3f}"
                     + (" ACC" if r_["accepted"] else "") for r_ in pool]
             png = assets / f"gt_top_{c}.png"
@@ -912,6 +919,23 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                                  png, ncols=5)
                 _image(pdf, png)
 
+    if has_gt:
+        pdf.add_page()
+        _h1(pdf, "Per image")
+        if analytics:
+            _para(pdf, "Every input image with its window, detection, GT-hit "
+                       "and false-positive counts. False positives per "
+                       f"image: mean {analytics['fp_mean']:.2f} +/- "
+                       f"{analytics['fp_std']:.2f}.")
+        _table(pdf, ["image", "size", "windows", "detections", "gt hit", "FP win"],
+               [[r["path"].name, f"{r['size'][0]}x{r['size'][1]}",
+                 r["n_windows"], len(r["detections"]),
+                 (f"{r['gt']['n_hit']}/{r['gt']['n_scored']}"
+                  if r["gt"] else "no gt"),
+                 r["gt"]["fp_windows"] if r["gt"] else "-"]
+                for r in results],
+               widths=[pdf.epw * w for w in (0.32, 0.14, 0.13, 0.15, 0.14, 0.12)])
+
     out_path = out_dir / f"report_{utc_stamp()}.pdf"
     pdf.output(str(out_path))
     return out_path
@@ -989,9 +1013,15 @@ def main(argv=None) -> None:
         analytics = gt_analytics(results, classes, hn_index, operating,
                                  args.top_n)
         if analytics:
+            counts = analytics["fp_counts"]
+            if len(counts) > 20:
+                nz = sum(1 for v in counts if v)
+                detail = (f"{nz} of {len(counts)} images with FPs, "
+                          f"max {max(counts)}")
+            else:
+                detail = f"counts: {counts}"
             print(f"false positives per image: mean {analytics['fp_mean']:.2f}, "
-                  f"std {analytics['fp_std']:.2f} "
-                  f"(counts: {analytics['fp_counts']})")
+                  f"std {analytics['fp_std']:.2f} ({detail})")
             for row in analytics["spec_at_recall"]:
                 print(f"  specificity at {row['target']:.0%} recall: "
                       f"{row['specificity']:.4f} (threshold {row['threshold']:.4f})")
