@@ -1109,7 +1109,10 @@ policy      autoaugment (ImageNet policy, no params)
       class)</li>
       <li><strong>top-N snippet grids per class</strong> (<code>--top-n</code>):
       the highest-P(class) windows across all images, green-bordered when
-      accepted AND sitting on a GT point of that class</li>
+      accepted AND sitting on a GT point of that class; each snippet is
+      numbered <code>#k</code> and its source filename listed in a matching
+      single-column table below the grid, so the grid stays a dense
+      row-major 5-wide layout however long the filenames are</li>
       <li><strong>should-have-caught grids per class</strong>: every window
       covering a GT point, captioned with its confidence rank among all
       windows classified toward that class (e.g. "rank 2/29"), green when it
@@ -1132,9 +1135,8 @@ policy      autoaugment (ImageNet policy, no params)
       the reference table lives at the end so the diagnostic pages come
       first (without <code>--gt</code> the summary table stays on the
       cover). Long filenames are never truncated: table cells wrap them
-      onto extra lines, and the top-N grids drop their column count (5
-      down to 1) so each cell is wide enough for the whole name, paginating
-      into extra pages when fewer columns need more rows</li>
+      onto extra lines, and the top-N grids reference source images by
+      number, keeping every filename whole in the legend column</li>
     </ul>
   </div>
 

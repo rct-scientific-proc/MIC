@@ -42,8 +42,8 @@ from checkpoints import find_checkpoint, utc_stamp
 from dataset import build_transform
 from metrics import _per_sample_thresholds, genuineness_scores, non_hn_argmax
 from model import build_model
-from plots import (SERIES, grid_ncols, plot_confusion_grid,
-                   plot_per_class_rocs, plot_sample_grid, plot_score_split)
+from plots import (SERIES, plot_confusion_grid, plot_per_class_rocs,
+                   plot_sample_grid, plot_score_split)
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
@@ -802,12 +802,13 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                                else "near" if cname in r_["covers"]
                                else "bad")
                      for r_ in pool]
-            caps = [f"{results[r_['img']]['path'].stem}\n"
-                    f"P={float(r_['probs'][c]):.3f} s={r_['s']:.3f}"
-                    + (" ACC" if r_["accepted"] else "") for r_ in pool]
-            # long filenames drop the column count; paginate in whole rows
-            nc = grid_ncols(caps)
-            per_page = nc * 4
+            # snippets carry a rank number, keeping the grid row-major
+            # and dense; the numbered filename column below the grid says
+            # which image each one came from, however long the names are
+            caps = [f"#{k + 1} P={float(r_['probs'][c]):.3f} s={r_['s']:.3f}"
+                    + (" ACC" if r_["accepted"] else "")
+                    for k, r_ in enumerate(pool)]
+            per_page = 20
             for start in range(0, len(pool), per_page):
                 if start:
                     pdf.add_page()
@@ -817,12 +818,17 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
                 png = assets / f"gt_top_{c}_{start}.png"
                 plot_sample_grid(crops[start:stop], caps[start:stop],
                                  f"highest P({cname}) windows across all "
-                                 f"images{rng}", png, ncols=nc)
+                                 f"images{rng}", png, ncols=5)
                 _image(pdf, png)
                 _para(pdf, "green border = accepted AND on a ground-truth "
                            f"{cname} point; yellow = on a {cname} point but "
                            "rejected by the threshold; red = not on a "
-                           f"{cname} point.", size=8.5)
+                           f"{cname} point. #k = source image below.",
+                      size=8.5)
+                _table(pdf, ["#", "image"],
+                       [[f"#{k + 1}", results[pool[k]["img"]]["path"].name]
+                        for k in range(start, stop)],
+                       widths=[pdf.epw * 0.07, pdf.epw * 0.93])
 
         for c, entries in sorted(analytics["should"].items()):
             cname = classes[c]
