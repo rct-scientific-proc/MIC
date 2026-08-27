@@ -1041,9 +1041,19 @@ policy      autoaugment (ImageNet policy, no params)
 
   <div class="arg" id="i-images">
     <div class="arg-head"><span class="flag">images</span><span class="badge">positional · one or more</span><span class="badge">required</span></div>
-    <p>Image files and/or directories (scanned non-recursively for
-    png/jpg/jpeg/bmp/tif/tiff). Loaded whole with Pillow and converted to RGB
+    <p>Image files and/or directories (scanned for
+    png/jpg/jpeg/bmp/tif/tiff — top level only unless
+    <code>--recursive</code>). Loaded whole with Pillow and converted to RGB
     (or grayscale with <code>--grayscale</code>).</p>
+  </div>
+
+  <div class="arg" id="i-recursive">
+    <div class="arg-head"><span class="flag">--recursive / -r</span><span class="badge">flag</span><span class="badge">default: off</span></div>
+    <p>Scan the given directories recursively, picking up images in every
+    subdirectory. Because ground-truth matching and overlay assets go by
+    <strong>filename only</strong> (directory paths never matter), a warning
+    lists any filename that appears in more than one place — those images
+    would share a GT entry and an overlay file.</p>
   </div>
 
   <div class="arg" id="i-window">

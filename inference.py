@@ -68,6 +68,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("images", nargs="+",
                    help="image files and/or directories (scanned for "
                         + "/".join(sorted(e.lstrip('.') for e in IMAGE_EXTS)) + ")")
+    p.add_argument("--recursive", "-r", action="store_true",
+                   help="scan the given directories recursively instead of "
+                        "top-level only")
     p.add_argument("--window-width", type=int, required=True)
     p.add_argument("--window-height", type=int, required=True)
     p.add_argument("--stride-x", type=int, required=True)
@@ -108,19 +111,33 @@ def parse_args(argv=None) -> argparse.Namespace:
     return args
 
 
-def gather_images(inputs) -> list[Path]:
+def gather_images(inputs, recursive: bool = False) -> list[Path]:
     paths: list[Path] = []
     for item in inputs:
         p = Path(item)
         if p.is_dir():
-            paths.extend(sorted(q for q in p.iterdir()
-                                if q.suffix.lower() in IMAGE_EXTS))
+            walk = p.rglob("*") if recursive else p.iterdir()
+            paths.extend(sorted(q for q in walk
+                                if q.is_file()
+                                and q.suffix.lower() in IMAGE_EXTS))
         elif p.is_file():
             paths.append(p)
         else:
             raise SystemExit(f"input not found: {p}")
     if not paths:
         raise SystemExit("no image files found in the given inputs")
+    # GT matching and overlay assets go by filename alone, so the same name
+    # in two directories would collide — surface that up front.
+    by_name: dict[str, list[Path]] = {}
+    for q in paths:
+        by_name.setdefault(q.name.lower(), []).append(q)
+    clashes = {k: v for k, v in by_name.items() if len(v) > 1}
+    if clashes:
+        print(f"WARNING: {len(clashes)} filename(s) appear in more than one "
+              "place; ground truth is matched by filename only and overlay "
+              "files are named by it, so these will share entries:")
+        for k in sorted(clashes):
+            print("  " + "  |  ".join(str(x) for x in clashes[k]))
     return paths
 
 
@@ -984,7 +1001,7 @@ def main(argv=None) -> None:
     gt_matched = 0
 
     results = []
-    for path in gather_images(args.images):
+    for path in gather_images(args.images, args.recursive):
         pil = Image.open(path).convert("L" if args.grayscale else "RGB")
         img = np.asarray(pil)
         if img.ndim == 2:
