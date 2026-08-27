@@ -119,6 +119,13 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--batch-size", type=int, default=64)
     t.add_argument("--lr", type=float, default=3e-4)
     t.add_argument("--weight-decay", type=float, default=1e-4)
+    t.add_argument("--optimizer", choices=("adamw", "sgd"), default="adamw",
+                   help="adamw (default: decoupled weight decay, forgiving of "
+                        "the LR choice) or sgd with momentum - the classic "
+                        "from-scratch CNN choice, which typically wants a "
+                        "~10x higher --lr than adamw's default")
+    t.add_argument("--momentum", type=float, default=0.9,
+                   help="sgd only: momentum (nesterov when > 0)")
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default=None, help="cuda / cpu (default: auto)")
     t.add_argument("--workers", type=int, default=0, help="DataLoader workers")
@@ -399,6 +406,17 @@ def parse_class_alphas(pairs, classes, hn_index) -> dict[int, float]:
     return out
 
 
+def build_optimizer(args, model) -> torch.optim.Optimizer:
+    """The training optimizer; smart-mode rewinds rebuild it fresh too."""
+    if args.optimizer == "sgd":
+        return torch.optim.SGD(model.parameters(), lr=args.lr,
+                               momentum=args.momentum,
+                               nesterov=args.momentum > 0,
+                               weight_decay=args.weight_decay)
+    return torch.optim.AdamW(model.parameters(), lr=args.lr,
+                             weight_decay=args.weight_decay)
+
+
 def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -572,8 +590,7 @@ def main(argv=None) -> None:
                         weights_path=args.weights_path).to(device)
     criterion = FocalLoss(len(classes), hn_index, gamma=args.focal_gamma,
                           hn_alpha=hn_alpha0).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                  weight_decay=args.weight_decay)
+    optimizer = build_optimizer(args, model)
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
 
     base_alphas = parse_class_alphas(args.class_alpha, classes, hn_index)
@@ -607,6 +624,12 @@ def main(argv=None) -> None:
         if resume_path is None:
             raise SystemExit(f"--resume: no checkpoint found at {args.resume}")
         ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        ck_opt = (ckpt.get("config") or {}).get("optimizer", "adamw")
+        if ck_opt != args.optimizer:
+            raise SystemExit(
+                f"--resume: checkpoint was trained with '{ck_opt}' but "
+                f"--optimizer {args.optimizer} was requested; optimizer "
+                "state cannot carry over - resume with the same optimizer")
         model.load_state_dict(ckpt["model_state"])
         optimizer.load_state_dict(ckpt["optimizer_state"])
         scaler.load_state_dict(ckpt["scaler_state"])
@@ -730,8 +753,7 @@ def main(argv=None) -> None:
                     mckpt = torch.load(out_dir / "milestone.pt",
                                        map_location=device, weights_only=False)
                     model.load_state_dict(mckpt["model_state"])
-                    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                                  weight_decay=args.weight_decay)
+                    optimizer = build_optimizer(args, model)
                     scaler = torch.amp.GradScaler(device.type, enabled=amp)
                     op_for_last = mckpt["val_metrics"]
                 boundary_msg = (f"  cycle {boundary_cycle}: {event}  ->  "

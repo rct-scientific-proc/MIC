@@ -396,10 +396,35 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
 
   <div class="arg" id="t-weight-decay">
     <div class="arg-head"><span class="flag">--weight-decay</span><span class="badge">float</span><span class="badge">default: 1e-4</span></div>
-    <p>AdamW's decoupled weight decay — L2-style shrinkage applied directly to
-    weights rather than through the gradient. Mild regularization; raise toward
-    1e-2 if the genuine classes are tiny and the model overfits them, lower it if
-    underfitting a large dataset.</p>
+    <p>Weight decay — L2-style shrinkage applied directly to weights (AdamW's
+    decoupled form, or SGD's <code>weight_decay</code>). Mild regularization;
+    raise toward 1e-2 if the genuine classes are tiny and the model overfits
+    them, lower it if underfitting a large dataset. On heavily imbalanced
+    data this knob deserves extra attention: rare-class classifier weights
+    are updated rarely but decayed constantly, biasing logits toward
+    frequent classes — if a rare class stalls, try lowering decay (1e-4 →
+    1e-5) before reaching for bigger machinery.</p>
+  </div>
+
+  <div class="arg" id="t-optimizer">
+    <div class="arg-head"><span class="flag">--optimizer</span><span class="badge">adamw | sgd</span><span class="badge">default: adamw</span></div>
+    <p><strong>adamw</strong> (decoupled weight decay, Loshchilov &amp;
+    Hutter) is the default: forgiving of the LR choice, comfortable with the
+    spiky gradients focal loss and rare classes produce, and the usual pick
+    for fine-tuning pretrained backbones. <strong>sgd</strong> (momentum,
+    nesterov) is the classic from-scratch CNN choice — capable of a slightly
+    better final model when its LR schedule is well tuned, but far more
+    LR-sensitive; it typically wants roughly a <em>10x higher</em>
+    <code>--lr</code> than adamw's 3e-4 default. The choice is stored in
+    checkpoints, and <code>--resume</code> refuses a mismatched optimizer
+    (its state cannot carry over); smart-mode rewinds rebuild whichever
+    optimizer is selected.</p>
+  </div>
+
+  <div class="arg" id="t-momentum">
+    <div class="arg-head"><span class="flag">--momentum</span><span class="badge">float</span><span class="badge">default: 0.9</span></div>
+    <p>SGD only: momentum coefficient (nesterov is enabled whenever it is
+    &gt; 0; <code>0</code> gives plain SGD). Ignored by adamw.</p>
   </div>
 
   <div class="arg" id="t-seed">
