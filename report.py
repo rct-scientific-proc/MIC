@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -32,11 +33,12 @@ from checkpoints import find_checkpoint, utc_stamp
 from dataset import SPLIT_NAMES, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset, validate_h5
 from metrics import (apply_threshold, calibration_bins, collect_probs,
                      final_prediction, genuine_vs_hn_roc, genuineness_scores,
-                     non_hn_argmax)
+                     non_hn_argmax, per_class_ovr_roc)
 from model import build_model
-from plots import (plot_calibration, plot_confusion, plot_controller_timeline,
-                   plot_genuine_vs_hn_roc, plot_history,
-                   plot_per_class_recall_history, plot_sample_grid)
+from plots import (plot_calibration, plot_confusion, plot_confusion_grid,
+                   plot_controller_timeline, plot_genuine_vs_hn_roc,
+                   plot_history, plot_per_class_recall_history,
+                   plot_per_class_rocs, plot_sample_grid, plot_score_split)
 
 # Light-theme ink/accent palette shared with plots.py, as RGB tuples.
 INK = (11, 11, 11)
@@ -50,6 +52,10 @@ WARN_WASH = (253, 246, 231)
 GOOD = (12, 100, 12)
 
 ECE_WARN = 0.10
+SPEC_AT_RECALL_TARGETS = (0.85, 0.90, 0.95, 0.98)
+# annotated confusion grids get unwieldy past this many classes; larger
+# label sets keep the compact heatmap instead
+MAX_GRID_CLASSES = 15
 
 
 def _txt(s) -> str:
@@ -429,6 +435,38 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
         fpr = tpr = None
         auroc = float("nan")
 
+    # sample-level operating-point analytics (mirrors the blind-inference
+    # report): positive = genuine-class sample, score = genuineness s
+    s_all = genuineness_scores(probs, hn_index)
+    pos_s = np.sort(s_all[labels != hn_index])[::-1]
+    neg_s = s_all[labels == hn_index]
+    spec_tbl = []
+    if len(pos_s) and len(neg_s):
+        for tgt in SPEC_AT_RECALL_TARGETS:
+            k = min(len(pos_s) - 1, max(0, math.ceil(tgt * len(pos_s)) - 1))
+            t = float(pos_s[k])
+            spec_tbl.append({"target": tgt, "threshold": t,
+                             "recall": float((pos_s >= t).mean()),
+                             "specificity": float((neg_s < t).mean())})
+    rocs = {}
+    for c in range(len(classes)):
+        if c == hn_index:
+            continue
+        try:
+            rocs[classes[c]] = per_class_ovr_roc(probs, labels, c)
+        except ValueError:
+            pass  # class absent from this split
+    stored_label = ("stored thresholds (per-class)" if per_class_mode
+                    else f"stored threshold {best['threshold']:.3f}")
+    confusions = [(stored_label, cm)]
+    for r_ in spec_tbl:
+        pr = final_prediction(probs, hn_index, r_["threshold"])
+        confusions.append(
+            (f"{r_['target']:.0%} recall (t={r_['threshold']:.3f})",
+             np.bincount(labels * len(classes) + pr,
+                         minlength=len(classes) ** 2)
+             .reshape(len(classes), -1)))
+
     # ---- assets ------------------------------------------------------------
     assets = out_dir / "report_assets"
     assets.mkdir(exist_ok=True)
@@ -449,8 +487,31 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
     charts["calibration"] = assets / "calibration.png"
     plot_calibration(cal, charts["calibration"],
                      threshold=None if per_class_mode else best["threshold"])
-    charts["confusion"] = assets / "confusion.png"
-    plot_confusion(cm, classes, charts["confusion"])
+    if len(classes) > MAX_GRID_CLASSES:
+        charts["confusion"] = assets / "confusion.png"
+        plot_confusion(cm, classes, charts["confusion"])
+    else:
+        charts["confusion_stored"] = assets / "confusion_stored.png"
+        plot_confusion_grid(confusions[:1], classes, classes,
+                            charts["confusion_stored"], ncols=1, scale=1.6)
+        if len(confusions) > 1:
+            charts["confusions_recall"] = assets / "confusions_recall.png"
+            plot_confusion_grid(confusions[1:], classes, classes,
+                                charts["confusions_recall"], ncols=2)
+    if len(pos_s) and len(neg_s):
+        charts["score_split"] = assets / "score_split.png"
+        plot_score_split(pos_s, neg_s, charts["score_split"],
+                         threshold=None if per_class_mode
+                         else best["threshold"],
+                         marks=[(f"{r_['target']:.0%} recall",
+                                 r_["threshold"]) for r_ in spec_tbl],
+                         pos_label="genuine samples",
+                         neg_label="hard_negative samples", unit="samples",
+                         title="Score separation: genuine vs hard_negative")
+    rocs_dropped: list[str] = []
+    if rocs:
+        charts["roc_per_class"] = assets / "roc_per_class.png"
+        rocs_dropped = plot_per_class_rocs(rocs, charts["roc_per_class"])
     class_pages, omitted_classes, miner_grid = _class_sample_pages(
         str(h5_path), split, probs, labels, operating, hn_index, classes, res,
         best, assets, thumbs)
@@ -493,6 +554,12 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
          if per_class_mode else f"global threshold {best['threshold']:.6f}")
         + f", floor {best.get('min_threshold', 0.0):.3f}",
     ]
+    s95 = next((r_ for r_ in spec_tbl
+                if abs(r_["target"] - 0.95) < 1e-9), None)
+    if s95:
+        verdict.append(
+            f"specificity at 95% acceptance recall: "
+            f"{s95['specificity']:.4f} at threshold {s95['threshold']:.3f}")
     target = config.get("target_recall")
     if met and target is not None and res["recall"] < float(target):
         verdict.append(
@@ -537,6 +604,54 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
     for key in ("roc", "calibration", "confusion"):
         if key in charts:
             _image(pdf, charts[key], w=pdf.epw * 0.72)
+
+    # ---- operating point (mirrors the blind-inference report) --------------
+    if "score_split" in charts or spec_tbl:
+        pdf.add_page()
+        _h1(pdf, "Operating point")
+        _para(pdf, "How well the genuineness score s = 1 - P(hard_negative) "
+                   "separates genuine samples from hard negatives - and "
+                   "where the stored threshold falls relative to the "
+                   "thresholds that would achieve fixed recalls.")
+        if "score_split" in charts:
+            _image(pdf, charts["score_split"])
+        if spec_tbl:
+            _h2(pdf, "Specificity at fixed recall")
+            _table(pdf, ["target recall", "achieved recall", "specificity",
+                         "threshold"],
+                   [[f"{r_['target']:.0%}", f"{r_['recall']:.4f}",
+                     f"{r_['specificity']:.4f}", f"{r_['threshold']:.4f}"]
+                    for r_ in spec_tbl],
+                   widths=[pdf.epw * v for v in (0.25, 0.25, 0.25, 0.25)])
+            _para(pdf, "positive = genuine-class sample, score = genuineness "
+                       "s; recall here counts acceptance only (not class "
+                       "correctness), so each row's threshold is directly "
+                       "comparable to the stored operating threshold.",
+                  size=8)
+    if "roc_per_class" in charts:
+        pdf.add_page()
+        _h1(pdf, "Per-class ROC")
+        _image(pdf, charts["roc_per_class"], w=pdf.epw * 0.85)
+        _para(pdf, "One-vs-rest over the split: score = P(class)."
+                   + (f" Omitted: {', '.join(rocs_dropped)}."
+                      if rocs_dropped else ""), size=8.5)
+    if "confusion_stored" in charts:
+        pdf.add_page()
+        _h1(pdf, "Confusion at the stored operating point")
+        _para(pdf, "Rows are the true class, columns the final call after "
+                   "the stored threshold - samples it rejects land in the "
+                   "hard_negative column.")
+        _image(pdf, charts["confusion_stored"])
+        if "confusions_recall" in charts:
+            pdf.add_page()
+            _h1(pdf, "Confusion at fixed-recall thresholds")
+            _para(pdf, "The same matrix re-applied at the thresholds that "
+                       "achieve 85/90/95/98% acceptance recall - watch the "
+                       "hard_negative column drain into the diagonal as the "
+                       "threshold drops. Misses that survive even the "
+                       "lowest threshold are classifier confusion, not the "
+                       "operating point.")
+            _image(pdf, charts["confusions_recall"])
 
     pdf.add_page()
     _h1(pdf, "Training history")

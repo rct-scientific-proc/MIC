@@ -333,20 +333,23 @@ def plot_sample_grid(images: list[np.ndarray], captions: list[str], title: str,
 
 
 def plot_score_split(pos_scores, neg_scores, path, threshold=None,
-                     marks=None) -> None:
-    """Genuineness-score distributions of windows that cover a ground-truth
-    point vs all other windows, with the stored operating threshold and
-    optional labelled marks (e.g. the thresholds that achieve fixed
-    recalls). Log-scaled counts: background windows outnumber GT windows by
-    orders of magnitude."""
+                     marks=None, pos_label="windows on GT points",
+                     neg_label="background windows", unit="windows",
+                     title="Score separation: GT windows vs background") -> None:
+    """Genuineness-score distributions of the positive population vs the
+    negative one, with the stored operating threshold and optional labelled
+    marks (e.g. the thresholds that achieve fixed recalls). Log-scaled
+    counts: negatives typically outnumber positives by orders of magnitude.
+    Default labels fit the inference report (windows on GT points vs
+    background); the training/evaluate report relabels for samples."""
     pos = np.asarray(pos_scores)
     neg = np.asarray(neg_scores)
     fig, ax = _new_axes((7.2, 4.0))
     bins = np.linspace(0.0, 1.0, 41)
     ax.hist(neg, bins, color=SERIES[1], alpha=0.55,
-            label=f"background windows (n={len(neg)})")
+            label=f"{neg_label} (n={len(neg)})")
     ax.hist(pos, bins, color=SERIES[2], alpha=0.8,
-            label=f"windows on GT points (n={len(pos)})")
+            label=f"{pos_label} (n={len(pos)})")
     ax.set_yscale("log")
     if threshold is not None:
         ax.axvline(threshold, color=INK, linewidth=1.4, linestyle=(0, (4, 3)))
@@ -361,8 +364,8 @@ def plot_score_split(pos_scores, neg_scores, path, threshold=None,
                 rotation=90, va="bottom", ha="left")
     ax.set_xlim(-0.02, 1.02)
     ax.set_xlabel("genuineness score s")
-    ax.set_ylabel("windows (log)")
-    ax.set_title("Score separation: GT windows vs background")
+    ax.set_ylabel(f"{unit} (log)")
+    ax.set_title(title)
     leg = ax.legend(loc="upper center", fontsize=8, framealpha=0.9,
                     facecolor=SURFACE, edgecolor=GRID)
     for text in leg.get_texts():

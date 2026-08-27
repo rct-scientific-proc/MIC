@@ -841,12 +841,20 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   <p class="syn">Every run ends with a PDF report
   (<code>report_&lt;UTCstamp&gt;.pdf</code> in the output directory — timestamped
   filenames, so reports accumulate as history rather than overwriting):
-  run identity and reconstructed command, a verdict box, an
+  run identity and reconstructed command, a verdict box (including
+  specificity at 95% acceptance recall), an
   auto-generated warnings section (classes still under rescue, unreachable
   targets, pressure ceilings, floor binding, fallback classes, high ECE — each
   with its recommended action), dataset and configuration tables, the training
   history and controller-timeline charts, a fresh inference pass at the stored
-  operating point (per-class table, ROC, calibration, confusion), and
+  operating point (per-class table, genuine-vs-HN ROC, calibration), the
+  <strong>operating-point pages the inference report introduced</strong> — a
+  score-separation histogram (genuine vs hard_negative samples, log scale)
+  with the stored threshold and fixed-recall thresholds marked, a
+  specificity-at-85/90/95/98%-recall table, a per-class one-vs-rest ROC
+  page, and confusion matrices at candidate operating points (a full-width
+  matrix at the stored threshold, then the same matrix at each fixed-recall
+  threshold; datasets over 15 classes keep the compact heatmap instead) — and
   <strong>one thumbnail page per genuine class</strong>: its best predictions
   (highest-confidence correct), its worst (missed/misclassified first, lowest
   scores), and its impostors — samples of other labels the model routes to
@@ -954,7 +962,11 @@ policy      autoaugment (ImageNet policy, no params)
   which is what keeps a test evaluation honest: thresholds were chosen on
   validation, the test split only ever sees them applied. The report lists each
   class's recall alongside the threshold it operates at, flagging classes on the
-  global fallback.</p>
+  global fallback. Its PDF carries the same operating-point pages as the
+  training report (score-separation histogram, specificity at fixed recalls,
+  per-class ROC, confusion at candidate operating points), computed on the
+  evaluated split; sections needing both populations are skipped on a split
+  without genuine or without hard-negative samples.</p>
 
   <div class="arg" id="e-checkpoint">
     <div class="arg-head"><span class="flag">checkpoint</span><span class="badge">positional · .pt or run dir</span><span class="badge">required</span></div>
