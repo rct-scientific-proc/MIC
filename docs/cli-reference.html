@@ -655,6 +655,26 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     step.</p>
   </div>
 
+  <div class="arg" id="t-recall-first">
+    <div class="arg-head"><span class="flag">--recall-first</span><span class="badge">level 1–5 · optional value</span><span class="badge">default: off · bare flag = 3</span></div>
+    <p>One-knob preset for <em>how hard training initially chases the recall
+    target before hard-negative pressure (specificity) is allowed to
+    matter</em> — the leveled counterpart to hand-tuning the ramp flags.
+    Level <strong>1</strong> is a brief soft-start (ramp 3, alpha 0.15 →
+    0.25); level <strong>3</strong> starts nearly hard-negative-free (ramp
+    12, alpha 0.05 → 0.25, ratio from 1.0); level <strong>5</strong> is a
+    long recall-only opening (ramp 35, alpha 0.01 → 0.25) that earns its
+    pressure slowly. Presets <code>--hn-alpha</code> (the start),
+    <code>--hn-alpha-end</code>, <code>--imbalance-ratio-start</code>, and —
+    in fixed-ramp mode — <code>--ramp-epochs</code>; any flag passed
+    explicitly (or set in <code>--config</code>) overrides its preset entry.
+    Because ramp progress only advances on epochs that meet the recall
+    target, higher levels also mean pressure is <em>earned</em>, not
+    scheduled. Combines with <code>--smart</code>: there the controller
+    paces pressure itself at cycle troughs, so only the endpoint values
+    apply.</p>
+  </div>
+
   <h3>Smart mode (adaptive controller)</h3>
   <p class="syn">An adaptive alternative to the fixed ramp (mutually exclusive with
   <code>--ramp-epochs</code>). Training is structured as <strong>LR cycles</strong>:

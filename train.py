@@ -62,6 +62,25 @@ SMART_PRESETS = {
             patience=12),
 }
 
+# --recall-first level presets: how hard training initially chases the
+# recall target before hard-negative pressure (specificity) is allowed to
+# matter. 1 = brief soft-start, 5 = long recall-only opening that starts
+# with almost no hard-negative influence. Values preset the pressure
+# endpoints; in fixed-ramp mode the ramp length too (smart mode paces
+# pressure itself at cycle troughs). Explicit flags always override.
+RECALL_FIRST_PRESETS = {
+    1: dict(ramp_epochs=3, hn_alpha=0.15, hn_alpha_end=0.25,
+            imbalance_ratio_start=None),
+    2: dict(ramp_epochs=6, hn_alpha=0.10, hn_alpha_end=0.25,
+            imbalance_ratio_start=2.0),
+    3: dict(ramp_epochs=12, hn_alpha=0.05, hn_alpha_end=0.25,
+            imbalance_ratio_start=1.0),
+    4: dict(ramp_epochs=20, hn_alpha=0.02, hn_alpha_end=0.25,
+            imbalance_ratio_start=1.0),
+    5: dict(ramp_epochs=35, hn_alpha=0.01, hn_alpha_end=0.25,
+            imbalance_ratio_start=1.0),
+}
+
 CSV_FIELDS = [
     "epoch", "train_loss", "threshold", "threshold_mode", "thr_min", "thr_max",
     "target_met", "recall", "recall_agg", "specificity", "max_recall", "auroc",
@@ -169,6 +188,19 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--imbalance-ratio-start", type=float, default=None,
                    help="starting imbalance ratio (default: same as --imbalance-ratio; "
                         "set lower, e.g. 1.0, to begin with few hard negatives)")
+    r.add_argument("--recall-first", type=int, nargs="?", const=3,
+                   default=None, choices=sorted(RECALL_FIRST_PRESETS),
+                   help="preset how hard training initially chases the recall "
+                        "target before hard-negative pressure ramps in: 1 = "
+                        "brief soft-start, 5 = long recall-only opening "
+                        "(starts with almost no hard-negative influence and "
+                        "earns pressure slowly). Bare --recall-first means "
+                        "level 3. Presets --hn-alpha (the start), "
+                        "--hn-alpha-end, --imbalance-ratio-start, and (in "
+                        "fixed-ramp mode) --ramp-epochs; any flag you pass "
+                        "explicitly overrides its preset. Combines with "
+                        "--smart, which paces the pressure itself, so only "
+                        "the endpoints apply there")
 
     s = p.add_argument_group(
         "smart mode",
@@ -248,10 +280,20 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _explicit_dests(argv) -> set:
+    """Which dests were explicitly given on the CLI: re-parse with every
+    default suppressed, so only provided options appear in the namespace."""
+    aux = build_parser()
+    for action in aux._actions:
+        if action.dest != "help":
+            action.default = argparse.SUPPRESS
+    return set(vars(aux.parse_args(argv)))
+
+
 def _apply_config(p: argparse.ArgumentParser, args: argparse.Namespace,
-                  argv) -> None:
+                  explicit: set) -> set:
     """Overlay config-file values onto `args` for every option the user did
-    NOT pass explicitly on the command line."""
+    NOT pass explicitly on the command line. Returns the dests it set."""
     try:
         cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
     except OSError as e:
@@ -261,14 +303,7 @@ def _apply_config(p: argparse.ArgumentParser, args: argparse.Namespace,
     if not isinstance(cfg, dict):
         p.error("--config: top level must be a JSON object")
 
-    # Which dests were explicitly given on the CLI: re-parse with every
-    # default suppressed, so only provided options appear in the namespace.
-    aux = build_parser()
-    for action in aux._actions:
-        if action.dest != "help":
-            action.default = argparse.SUPPRESS
-    explicit = set(vars(aux.parse_args(argv)))
-
+    applied: set = set()
     actions = {a.dest: a for a in p._actions}
     for key, value in cfg.items():
         dest = key.replace("-", "_").lstrip("_")
@@ -293,13 +328,16 @@ def _apply_config(p: argparse.ArgumentParser, args: argparse.Namespace,
                     p.error(f"--config: '{key}': {v!r} not in "
                             f"{sorted(action.choices)}")
         setattr(args, dest, value)
+        applied.add(dest)
+    return applied
 
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = build_parser()
     args = p.parse_args(argv)
+    explicit = _explicit_dests(sys.argv[1:] if argv is None else argv)
     if args.config:
-        _apply_config(p, args, sys.argv[1:] if argv is None else argv)
+        explicit |= _apply_config(p, args, explicit)
     if args.h5 is None:
         p.error("the dataset .h5 path is required (positional argument or "
                 "\"h5\" in --config)")
@@ -309,6 +347,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     if args.rescue and not args.smart:
         p.error("--rescue requires --smart (rescue decisions run at cycle "
                 "troughs)")
+
+    # --recall-first preset: pressure endpoints (and, in fixed-ramp mode,
+    # the ramp length) for options not given on the CLI or in the config.
+    if args.recall_first:
+        for attr, value in RECALL_FIRST_PRESETS[args.recall_first].items():
+            if value is None or attr in explicit:
+                continue
+            if attr == "ramp_epochs" and args.smart:
+                continue  # smart mode paces pressure at cycle troughs
+            setattr(args, attr, value)
 
     # Fill unset (None) values: from the --smart level preset, or from the
     # base defaults in non-smart mode. Explicit flags always win.
