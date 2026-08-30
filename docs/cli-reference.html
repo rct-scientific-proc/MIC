@@ -862,6 +862,76 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
     score pool every epoch.</p>
   </div>
 
+  <h3>Optuna search (optional)</h3>
+  <p class="syn">Hyper-parameter search built into the training CLI, needing only
+  <code>pip install optuna</code>. <code>--optuna N</code> turns one invocation
+  into a study of N trials: each trial re-parses your base command line plus
+  its sampled flags — so presets, <code>--config</code>, and the usual
+  precedence apply, with the <em>searched</em> options overriding their
+  CLI/config values and everything else held fixed — and trains into
+  <code>&lt;out-dir&gt;/trial_NNN</code> (no per-trial PDF). The study
+  <strong>maximizes hard-negative specificity at the recall target</strong>:
+  a trial that meets the target scores its specificity; one that doesn't
+  scores <code>recall − 1</code> (always negative), so unmet trials rank
+  beneath every met one, ordered by how close they came. Each epoch's value
+  is reported to a median pruner, which stops trials that trail the median
+  of earlier trials at the same epoch (after 5 startup trials and the
+  warmup). Outputs: <code>trials.csv</code> (every trial's state, value,
+  parameters, best epoch, recall/specificity, directory),
+  <code>best_trial.json</code>, and the best trial's own
+  <code>config.json</code>, which reproduces it with
+  <code>python train.py --config &lt;that file&gt;</code>. A sensible
+  pattern: search at <code>--smart 1</code> or a modest fixed epoch budget,
+  then retrain the winning config at full effort. Trials reuse
+  <code>--seed</code>, so configurations are compared under the same data
+  order.</p>
+
+  <div class="arg" id="t-optuna">
+    <div class="arg-head"><span class="flag">--optuna</span><span class="badge">int · N_TRIALS</span><span class="badge">default: off</span></div>
+    <p>Run a study of this many trials instead of a single training run.
+    Mutually exclusive with <code>--resume</code> (trials start fresh; an
+    interrupted <em>study</em> resumes through its storage — rerun the same
+    command with the same out-dir and recorded trials are kept).</p>
+  </div>
+
+  <div class="arg" id="t-optuna-space">
+    <div class="arg-head"><span class="flag">--optuna-space</span><span class="badge">path (.json)</span><span class="badge">default: built-in space</span></div>
+    <p>JSON object of <code>{option: spec}</code> where option is any train.py
+    option name (dashes or underscores) and spec is <code>{"type":
+    "float"|"int"|"categorical", "low", "high", "log", "step", "choices"}</code>;
+    a <code>null</code> choice leaves the option at its CLI/config/preset
+    value. Option names are validated before the first trial. The built-in
+    space searches <code>lr</code> (log 1e-5..1e-2), <code>weight-decay</code>
+    (log 1e-6..1e-2), <code>optimizer</code>, <code>focal-gamma</code>
+    (0.5..4), <code>hn-alpha-end</code> (0.1..1) and <code>recall-first</code>
+    (off or 1–5); <code>example_optuna_space.json</code> in the repo root
+    mirrors it as a starting point. Keep <code>--smart</code> and
+    <code>--ramp-epochs</code> out of the same space — the parser rejects
+    that combination, and a parse error inside a trial aborts the whole
+    study (loudly, so a bad space never burns trials silently).</p>
+  </div>
+
+  <div class="arg" id="t-optuna-storage">
+    <div class="arg-head"><span class="flag">--optuna-storage</span><span class="badge">URL</span><span class="badge">default: sqlite in out-dir</span></div>
+    <p>Optuna storage URL. The default <code>sqlite:///&lt;out-dir&gt;/optuna.db</code>
+    makes the study resumable and inspectable with Optuna's own tooling
+    (e.g. <code>optuna-dashboard</code>); point it at a shared database to
+    run trials from several machines.</p>
+  </div>
+
+  <div class="arg" id="t-optuna-prune-warmup">
+    <div class="arg-head"><span class="flag">--optuna-prune-warmup</span><span class="badge">int · epochs</span><span class="badge">default: 3</span></div>
+    <p>Epochs a trial always runs before the median pruner may stop it. Raise
+    it under <code>--smart</code>, whose rewinds make early epochs
+    non-monotonic — a cycle length or two is a safe value.</p>
+  </div>
+
+  <div class="arg" id="t-optuna-no-prune">
+    <div class="arg-head"><span class="flag">--optuna-no-prune</span><span class="badge">switch</span><span class="badge">default: off (pruning on)</span></div>
+    <p>Run every trial to completion. Costs more but gives the sampler clean
+    final values for every configuration, which helps small studies.</p>
+  </div>
+
   <h3>Report group</h3>
   <p class="syn">Every run ends with a PDF report
   (<code>report_&lt;UTCstamp&gt;.pdf</code> in the output directory — timestamped

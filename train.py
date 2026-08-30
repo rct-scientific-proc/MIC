@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import math
 import random
@@ -80,6 +81,21 @@ RECALL_FIRST_PRESETS = {
     5: dict(ramp_epochs=35, hn_alpha=0.01, hn_alpha_end=0.25,
             imbalance_ratio_start=1.0),
 }
+
+# --optuna default search space, in the --optuna-space JSON format:
+# {option: spec} where spec is {"type": "float"|"int"|"categorical", "low",
+# "high", "log", "step", "choices"}. Any train.py option can be searched; a
+# null choice leaves the option at its CLI/config/preset value.
+OPTUNA_DEFAULT_SPACE = {
+    "lr": {"type": "float", "low": 1e-5, "high": 1e-2, "log": True},
+    "weight_decay": {"type": "float", "low": 1e-6, "high": 1e-2, "log": True},
+    "optimizer": {"type": "categorical", "choices": ["adamw", "sgd"]},
+    "focal_gamma": {"type": "float", "low": 0.5, "high": 4.0},
+    "hn_alpha_end": {"type": "float", "low": 0.1, "high": 1.0},
+    "recall_first": {"type": "categorical", "choices": [None, 1, 2, 3, 4, 5]},
+}
+OPTUNA_KEYS = ("optuna", "optuna_space", "optuna_storage",
+               "optuna_prune_warmup", "optuna_no_prune")
 
 CSV_FIELDS = [
     "epoch", "train_loss", "threshold", "threshold_mode", "thr_min", "thr_max",
@@ -264,6 +280,31 @@ def build_parser() -> argparse.ArgumentParser:
     mi.add_argument("--mining-random-frac", type=float, default=0.2,
                     help="share of the hard-negative budget drawn uniformly at random")
 
+    ou = p.add_argument_group(
+        "optuna search",
+        "optional hyper-parameter search (pip install optuna): every trial "
+        "is a full training run with the searched options overriding their "
+        "CLI/config values, into <out-dir>/trial_NNN; everything else is "
+        "fixed. Maximizes HN specificity at the recall target (unmet "
+        "trials rank beneath every met one).",
+    )
+    ou.add_argument("--optuna", type=int, default=None, metavar="N_TRIALS",
+                    help="run an Optuna study of this many trials instead "
+                         "of a single training run")
+    ou.add_argument("--optuna-space", default=None, metavar="SPACE.json",
+                    help="search space (default: lr, weight-decay, "
+                         "optimizer, focal-gamma, hn-alpha-end, "
+                         "recall-first); see example_optuna_space.json")
+    ou.add_argument("--optuna-storage", default=None, metavar="URL",
+                    help="Optuna storage URL (default: sqlite db in the "
+                         "out dir, so an interrupted study resumes)")
+    ou.add_argument("--optuna-prune-warmup", type=int, default=3,
+                    help="epochs a trial runs before the median pruner may "
+                         "stop it (raise for --smart, whose rewinds make "
+                         "early epochs non-monotonic)")
+    ou.add_argument("--optuna-no-prune", action="store_true",
+                    help="run every trial to completion")
+
     d = p.add_argument_group("data")
     d.add_argument("--imagenet-norm", action="store_true",
                    help="ImageNet mean/std normalization (default: just /255)")
@@ -354,6 +395,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     if args.rescue and not args.smart:
         p.error("--rescue requires --smart (rescue decisions run at cycle "
                 "troughs)")
+    if args.optuna is not None and args.optuna < 1:
+        p.error("--optuna expects a positive trial count")
+    if args.optuna and args.resume:
+        p.error("--optuna and --resume are mutually exclusive (trials start "
+                "fresh; an interrupted study resumes via its storage)")
 
     # --recall-first preset: pressure endpoints (and, in fixed-ramp mode,
     # the ramp length) for options not given on the CLI or in the config.
@@ -542,6 +588,16 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+    if args.optuna:
+        run_optuna(args, sys.argv[1:] if argv is None else list(argv))
+        return
+    train(args)
+
+
+def train(args, on_epoch_end=None) -> dict:
+    """One training run. on_epoch_end(epoch, op) -> bool is called after
+    each epoch's checkpoints are written; returning True stops the run
+    early (Optuna pruning). Returns the best epoch/metrics and paths."""
     seed_everything(args.seed)
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -618,6 +674,9 @@ def main(argv=None) -> None:
 
     start_epoch = 0
     best_key = None
+    best_op = None
+    best_epoch = None
+    stopped_early = False
     ramp_progress = 0
     if args.resume:
         resume_path = find_checkpoint(args.resume, "last")
@@ -724,6 +783,7 @@ def main(argv=None) -> None:
                                 **ckpt_kw)
         if improved:
             best_key = key
+            best_op, best_epoch = op, epoch
             epochs_since_best = 0
             best_path = out_dir / checkpoint_name("best", epoch, op)
             save_checkpoint(best_path, best_key=best_key, **ckpt_kw)
@@ -827,6 +887,10 @@ def main(argv=None) -> None:
                         best_key=best_key)
         prune_role(out_dir, "last", last_path)
 
+        if on_epoch_end is not None and on_epoch_end(epoch, op):
+            print(f"stopped after epoch {epoch} (pruned)")
+            stopped_early = True
+            break
         if stop:
             break
         if controller is None and args.patience and epochs_since_best >= args.patience:
@@ -850,6 +914,162 @@ def main(argv=None) -> None:
             print(f"report generation failed (training outputs unaffected): {e}")
 
     print(f"done. checkpoints and metrics.csv in {out_dir}")
+    return {"out_dir": out_dir, "best_epoch": best_epoch, "best_metrics": best_op,
+            "best_path": find_checkpoint(out_dir, "best"),
+            "stopped_early": stopped_early}
+
+
+# ---- optional Optuna search -------------------------------------------------
+
+def optuna_objective_value(op: dict) -> float:
+    """The scalar a study maximizes: HN specificity once the recall target is
+    met; below it, recall - 1 (always negative), so unmet trials rank beneath
+    every met one, ordered by how close they came."""
+    if op["target_met"]:
+        return float(op["specificity"])
+    return float(op["recall"]) - 1.0
+
+
+def _optuna_suggest(trial, name: str, spec: dict):
+    kind = spec.get("type", "float")
+    if kind == "categorical":
+        return trial.suggest_categorical(name, list(spec["choices"]))
+    if kind == "int":
+        return trial.suggest_int(name, int(spec["low"]), int(spec["high"]),
+                                 step=int(spec.get("step", 1)),
+                                 log=bool(spec.get("log", False)))
+    if kind == "float":
+        return trial.suggest_float(name, float(spec["low"]), float(spec["high"]),
+                                   step=spec.get("step"),
+                                   log=bool(spec.get("log", False)))
+    raise SystemExit(f"--optuna-space: '{name}': unknown type '{kind}' "
+                     "(float, int, or categorical)")
+
+
+def _optuna_flags(parser: argparse.ArgumentParser, params: dict) -> list[str]:
+    """Sampled {dest: value} -> CLI tokens appended to the base argv, so the
+    normal precedence machinery (presets, config) applies to each trial."""
+    actions = {a.dest: a for a in parser._actions}
+    out: list[str] = []
+    for dest, value in params.items():
+        action = actions.get(dest)
+        if action is None or not action.option_strings:
+            raise SystemExit(f"--optuna-space: '{dest}' is not a train.py option")
+        if value is None:
+            continue
+        flag = next((o for o in action.option_strings if o.startswith("--")),
+                    action.option_strings[0])
+        if isinstance(action, argparse._StoreTrueAction):
+            if value:
+                out.append(flag)
+        elif isinstance(value, (list, tuple)):
+            out.append(flag)
+            out.extend(str(v) for v in value)
+        else:
+            out.extend([flag, str(value)])
+    return out
+
+
+def run_optuna(args, argv: list[str]) -> None:
+    """Study of args.optuna trials; each trial re-parses the base argv plus
+    its sampled flags, trains into <out_dir>/trial_NNN (no PDF), and reports
+    per-epoch values for pruning. Results land in trials.csv and
+    best_trial.json; the best trial's config.json reproduces it."""
+    try:
+        import optuna
+    except ImportError:
+        raise SystemExit("--optuna needs the optuna package: pip install optuna")
+    parser = build_parser()
+    space = OPTUNA_DEFAULT_SPACE
+    if args.optuna_space:
+        space = json.loads(Path(args.optuna_space).read_text(encoding="utf-8"))
+        if not isinstance(space, dict) or not space:
+            raise SystemExit("--optuna-space: expected a non-empty JSON object")
+    _optuna_flags(parser, {k: 0 for k in space})  # validate option names now
+
+    base = Path(args.out_dir or f"runs/optuna_{datetime.now():%Y%m%d_%H%M%S}")
+    base.mkdir(parents=True, exist_ok=True)
+    storage = args.optuna_storage or f"sqlite:///{(base / 'optuna.db').as_posix()}"
+    pruner = (optuna.pruners.NopPruner() if args.optuna_no_prune else
+              optuna.pruners.MedianPruner(n_startup_trials=5,
+                                          n_warmup_steps=args.optuna_prune_warmup))
+    study = optuna.create_study(
+        study_name=base.name, storage=storage, load_if_exists=True,
+        direction="maximize", pruner=pruner,
+        sampler=optuna.samplers.TPESampler(seed=args.seed))
+    print(f"optuna study '{study.study_name}' ({storage}): {args.optuna} trials"
+          + (f", {len(study.trials)} already recorded" if study.trials else "")
+          + f"; searching {', '.join(space)}")
+
+    def objective(trial):
+        params = {name: _optuna_suggest(trial, name, spec)
+                 for name, spec in space.items()}
+        trial_dir = base / f"trial_{trial.number:03d}"
+        flags = _optuna_flags(parser, params) + ["--out-dir", str(trial_dir),
+                                                  "--no-report"]
+        t_args = parse_args(argv + flags)
+        for k in OPTUNA_KEYS:  # the trial's config.json must not relaunch a study
+            setattr(t_args, k, None if k != "optuna_no_prune" else False)
+        print(f"\n=== trial {trial.number}: "
+              + ", ".join(f"{k}={v}" for k, v in params.items()) + " ===")
+
+        def on_epoch_end(epoch, op):
+            trial.report(optuna_objective_value(op), epoch)
+            return trial.should_prune()
+
+        result = train(t_args, on_epoch_end=on_epoch_end)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        trial.set_user_attr("out_dir", str(trial_dir))
+        if result["stopped_early"] or result["best_metrics"] is None:
+            raise optuna.TrialPruned()
+        op = result["best_metrics"]
+        trial.set_user_attr("best_epoch", result["best_epoch"])
+        trial.set_user_attr("recall", float(op["recall"]))
+        trial.set_user_attr("specificity", float(op["specificity"]))
+        trial.set_user_attr("target_met", bool(op["target_met"]))
+        return optuna_objective_value(op)
+
+    study.optimize(objective, n_trials=args.optuna, gc_after_trial=True)
+
+    names = list(space)
+    with open(base / "trials.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["trial", "state", "value", *names, "best_epoch", "recall",
+                    "specificity", "target_met", "out_dir"])
+        for t in study.trials:
+            w.writerow([t.number, t.state.name,
+                        "" if t.value is None else f"{t.value:.6f}",
+                        *[t.params.get(n, "") for n in names],
+                        *[t.user_attrs.get(k, "") for k in
+                          ("best_epoch", "recall", "specificity", "target_met",
+                           "out_dir")]])
+    complete = [t for t in study.trials
+                if t.state == optuna.trial.TrialState.COMPLETE]
+    print(f"\n{len(complete)} of {len(study.trials)} trials complete "
+          f"({len(study.trials) - len(complete)} pruned/failed); "
+          f"trials.csv in {base}")
+    if not complete:
+        print("no trial completed - nothing to pick a best from")
+        return
+    best = study.best_trial
+    best_dir = Path(best.user_attrs["out_dir"])
+    summary = {"trial": best.number, "value": best.value, "params": best.params,
+               "best_epoch": best.user_attrs.get("best_epoch"),
+               "recall": best.user_attrs.get("recall"),
+               "specificity": best.user_attrs.get("specificity"),
+               "target_met": best.user_attrs.get("target_met"),
+               "out_dir": str(best_dir), "config": str(best_dir / "config.json")}
+    (base / "best_trial.json").write_text(json.dumps(summary, indent=2),
+                                          encoding="utf-8")
+    print(f"best: trial {best.number}  value {best.value:.4f}  "
+          f"(recall {summary['recall']:.4f}, specificity "
+          f"{summary['specificity']:.4f}, target "
+          f"{'met' if summary['target_met'] else 'NOT met'})")
+    print("  " + ", ".join(f"{k}={v}" for k, v in best.params.items()))
+    print(f"  reproduce: python train.py --config {best_dir / 'config.json'}")
+    print(f"  summary: {base / 'best_trial.json'}")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,8 @@ start of each run, and is gitignored.
 from __future__ import annotations
 
 import csv
+import importlib.util
+import json
 import shutil
 import subprocess
 import sys
@@ -219,6 +221,28 @@ def main() -> None:
         "--out-dir", OUT_ROOT / "run_opt", "--no-report", "--patience", "0",
         "--seed", "1", *GPU_TRAIN)
     assert (OUT_ROOT / "run_opt" / "metrics.csv").exists()
+
+    # --optuna: a two-trial study on the tiny dataset, then the best trial's
+    # config.json reproduces a plain run (optuna is an optional dependency)
+    if importlib.util.find_spec("optuna") is not None:
+        out_hp = OUT_ROOT / "run_optuna"
+        run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+            "--batch-size", "32", "--target-recall", "0.5", "--epochs", "2",
+            "--out-dir", out_hp, "--optuna", "2", "--optuna-prune-warmup", "0",
+            "--patience", "0", "--seed", "1", "--no-progress", *GPU_TRAIN)
+        assert (out_hp / "trials.csv").exists(), "trials.csv missing"
+        best = json.loads((out_hp / "best_trial.json").read_text(encoding="utf-8"))
+        assert Path(best["config"]).exists(), "best trial config.json missing"
+        assert len(list(out_hp.glob("trial_*"))) == 2
+        run(REPO / "train.py", "--config", best["config"], "--epochs", "1",
+            "--out-dir", OUT_ROOT / "run_optuna_repro", "--no-report",
+            "--no-progress", *GPU_TRAIN)
+        assert (OUT_ROOT / "run_optuna_repro" / "metrics.csv").exists()
+        assert not (OUT_ROOT / "run_optuna_repro" / "trials.csv").exists(), \
+            "reproducing a trial config relaunched a study"
+        print("optuna study: best trial", best["trial"], "value", best["value"])
+    else:
+        print("optuna not installed - search leg skipped")
 
     print(f"\noutputs kept in {OUT_ROOT}")
     print("SMOKE TEST PASSED")
