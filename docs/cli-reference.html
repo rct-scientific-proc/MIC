@@ -867,8 +867,13 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   <code>pip install optuna</code>. <code>--optuna N</code> turns one invocation
   into a study of N trials: each trial re-parses your base command line plus
   its sampled flags — so presets, <code>--config</code>, and the usual
-  precedence apply, with the <em>searched</em> options overriding their
-  CLI/config values and everything else held fixed — and trains into
+  precedence apply. Per trial the hierarchy is <strong>explicit CLI flags &gt;
+  sampled space &gt; config file &gt; presets &gt; defaults</strong>: an option
+  you pass explicitly on the study command line (say <code>--amp
+  --batch-size 96</code>) is <em>pinned</em> for every trial — a space
+  dimension naming it is dropped with a printed note, so a trial's recorded
+  parameters always match what actually ran — while config-file values stay
+  searchable. Each trial trains into
   <code>&lt;out-dir&gt;/trial_NNN</code> (no per-trial PDF). The study
   <strong>maximizes hard-negative specificity at the recall target</strong>:
   a trial that meets the target scores its specificity; one that doesn't
@@ -897,10 +902,13 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   <div class="arg" id="t-optuna-space">
     <div class="arg-head"><span class="flag">--optuna-space</span><span class="badge">path (.json)</span><span class="badge">default: built-in space</span></div>
     <p>JSON object of <code>{option: spec}</code> where option is any train.py
-    option name (dashes or underscores) and spec is <code>{"type":
+    option name (dashes or underscores; keys starting with <code>_</code> are
+    ignored, so the file can carry comments) and spec is <code>{"type":
     "float"|"int"|"categorical", "low", "high", "log", "step", "choices"}</code>;
-    a <code>null</code> choice leaves the option at its CLI/config/preset
-    value. Option names are validated before the first trial. The built-in
+    a <code>null</code> choice leaves the option at its config/preset
+    value. Option names are validated before the first trial, and dimensions
+    colliding with an explicit CLI flag are removed with a printed note (the
+    flag pins its value — searching every dimension away errors out). The built-in
     space searches <code>lr</code> (log 1e-5..1e-2), <code>weight-decay</code>
     (log 1e-6..1e-2), <code>optimizer</code>, <code>focal-gamma</code>
     (0.5..4), <code>hn-alpha-end</code> (0.1..1) and <code>recall-first</code>

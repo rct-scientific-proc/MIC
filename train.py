@@ -982,10 +982,30 @@ def run_optuna(args, argv: list[str]) -> None:
     parser = build_parser()
     space = OPTUNA_DEFAULT_SPACE
     if args.optuna_space:
-        space = json.loads(Path(args.optuna_space).read_text(encoding="utf-8"))
-        if not isinstance(space, dict) or not space:
-            raise SystemExit("--optuna-space: expected a non-empty JSON object")
+        loaded = json.loads(Path(args.optuna_space).read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise SystemExit("--optuna-space: expected a JSON object")
+        # "_"-prefixed keys are comments; dashes and underscores both work
+        space = {k.replace("-", "_"): v for k, v in loaded.items()
+                 if not k.startswith("_")}
+        if not space:
+            raise SystemExit("--optuna-space: no search dimensions found")
     _optuna_flags(parser, {k: 0 for k in space})  # validate option names now
+
+    # Options passed explicitly on the study command line PIN their value:
+    # colliding dimensions leave the space, so a trial's recorded parameters
+    # always match what actually ran (a sampled store_true flag could not
+    # even be un-set past an explicit CLI flag). Config-file values stay
+    # searchable - per trial the precedence is CLI pin > sampled > config.
+    pinned = sorted(k for k in space if k in _explicit_dests(argv))
+    for k in pinned:
+        print(f"note: --{k.replace('_', '-')} is set on the command line - "
+              "removed from the search space (explicit flags pin their "
+              "value for every trial)")
+    space = {k: v for k, v in space.items() if k not in pinned}
+    if not space:
+        raise SystemExit("every search dimension is pinned on the command "
+                         "line; nothing left to search")
 
     base = Path(args.out_dir or f"runs/optuna_{datetime.now():%Y%m%d_%H%M%S}")
     base.mkdir(parents=True, exist_ok=True)
