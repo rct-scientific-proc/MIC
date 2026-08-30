@@ -440,8 +440,6 @@ def gt_analytics(results, classes, hn_index: int, operating,
 
 HIT_COLOR = "#0ca30c"    # status good
 MISS_COLOR = "#d03b3b"   # status critical
-HIT_RGB = (12, 163, 12)
-MISS_RGB = (208, 59, 59)
 
 
 BORDER_RGB = {

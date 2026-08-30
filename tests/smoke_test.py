@@ -241,6 +241,31 @@ def main() -> None:
         assert not (OUT_ROOT / "run_optuna_repro" / "trials.csv").exists(), \
             "reproducing a trial config relaunched a study"
         print("optuna study: best trial", best["trial"], "value", best["value"])
+
+        # pinning + comment keys: an explicit CLI flag removes its dimension
+        # from a custom space (single note), "_"-keys are comments, and the
+        # trial's recorded values match its config.json (effective values)
+        space = OUT_ROOT / "space.json"
+        space.write_text(json.dumps({
+            "_note": "smoke space",
+            "lr": {"type": "float", "low": 1e-4, "high": 1e-3, "log": True},
+            "batch-size": {"type": "categorical", "choices": [16, 64]},
+        }), encoding="utf-8")
+        out_pin = OUT_ROOT / "run_optuna_pin"
+        run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+            "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
+            "--out-dir", out_pin, "--optuna", "1", "--optuna-space", space,
+            "--patience", "0", "--seed", "1", "--no-progress", *GPU_TRAIN)
+        header, row = (out_pin / "trials.csv").read_text(
+            encoding="utf-8").splitlines()[:2]
+        cols = dict(zip(header.split(","), row.split(",")))
+        cfg0 = json.loads((out_pin / "trial_000" / "config.json")
+                          .read_text(encoding="utf-8"))
+        assert cfg0["batch_size"] == 32, "CLI pin did not hold in the trial"
+        assert cols["batch_size"] == "32", \
+            "pinned value missing from trials.csv effective columns"
+        assert float(cols["lr"]) == cfg0["lr"], \
+            "trials.csv lr does not match the trial's config.json"
     else:
         print("optuna not installed - search leg skipped")
 

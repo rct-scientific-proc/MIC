@@ -84,8 +84,10 @@ RECALL_FIRST_PRESETS = {
 
 # --optuna default search space, in the --optuna-space JSON format:
 # {option: spec} where spec is {"type": "float"|"int"|"categorical", "low",
-# "high", "log", "step", "choices"}. Any train.py option can be searched; a
-# null choice leaves the option at its CLI/config/preset value.
+# "high", "log", "step", "choices"}. Most train.py options can be searched;
+# a null choice leaves the option at its config/preset value, and an option
+# passed explicitly on the study command line pins its value (the dimension
+# leaves the space).
 OPTUNA_DEFAULT_SPACE = {
     "lr": {"type": "float", "low": 1e-5, "high": 1e-2, "log": True},
     "weight_decay": {"type": "float", "low": 1e-6, "high": 1e-2, "log": True},
@@ -96,6 +98,8 @@ OPTUNA_DEFAULT_SPACE = {
 }
 OPTUNA_KEYS = ("optuna", "optuna_space", "optuna_storage",
                "optuna_prune_warmup", "optuna_no_prune")
+# options the study itself manages per trial - never searchable
+OPTUNA_RESERVED = {"h5", "config", "out_dir", "no_report", "resume"}
 
 CSV_FIELDS = [
     "epoch", "train_loss", "threshold", "threshold_mode", "thr_min", "thr_max",
@@ -114,7 +118,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "given in --config as \"h5\"")
     p.add_argument("--config", default=None, metavar="FILE.json",
                    help="JSON file of options (keys = long option names, "
-                        "dashes or underscores). Precedence: explicit CLI "
+                        "dashes or underscores; keys starting with _ are "
+                        "comments). Precedence: explicit CLI "
                         "flags > config file > --smart level presets > "
                         "defaults. Every run writes its resolved options to "
                         "<out-dir>/config.json, which is itself a valid "
@@ -283,9 +288,10 @@ def build_parser() -> argparse.ArgumentParser:
     ou = p.add_argument_group(
         "optuna search",
         "optional hyper-parameter search (pip install optuna): every trial "
-        "is a full training run with the searched options overriding their "
-        "CLI/config values, into <out-dir>/trial_NNN; everything else is "
-        "fixed. Maximizes HN specificity at the recall target (unmet "
+        "is a full training run into <out-dir>/trial_NNN. Per trial the "
+        "precedence is explicit CLI flags (pinned; colliding dimensions "
+        "leave the space) > sampled space > config file > presets > "
+        "defaults. Maximizes HN specificity at the recall target (unmet "
         "trials rank beneath every met one).",
     )
     ou.add_argument("--optuna", type=int, default=None, metavar="N_TRIALS",
@@ -328,6 +334,29 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _load_json_object(flag: str, path) -> dict:
+    """Read a JSON side-file (--config / --optuna-space) with clean errors
+    instead of raw tracebacks for the two most common user mistakes."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as e:
+        raise SystemExit(f"{flag}: cannot read {path}: {e}")
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"{flag}: {path} is not valid JSON: {e}")
+    if not isinstance(data, dict):
+        raise SystemExit(f"{flag}: top level must be a JSON object")
+    return data
+
+
+def _json_key_dest(key: str) -> str | None:
+    """One key dialect for BOTH JSON side-files: leading dashes are
+    optional, inner dashes equal underscores, and a leading underscore
+    marks a comment key (returns None - the entry is skipped)."""
+    if key.startswith("_"):
+        return None
+    return key.lstrip("-").replace("-", "_")
+
+
 def _explicit_dests(argv) -> set:
     """Which dests were explicitly given on the CLI: re-parse with every
     default suppressed, so only provided options appear in the namespace."""
@@ -342,19 +371,14 @@ def _apply_config(p: argparse.ArgumentParser, args: argparse.Namespace,
                   explicit: set) -> set:
     """Overlay config-file values onto `args` for every option the user did
     NOT pass explicitly on the command line. Returns the dests it set."""
-    try:
-        cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
-    except OSError as e:
-        p.error(f"--config: cannot read {args.config}: {e}")
-    except json.JSONDecodeError as e:
-        p.error(f"--config: {args.config} is not valid JSON: {e}")
-    if not isinstance(cfg, dict):
-        p.error("--config: top level must be a JSON object")
+    cfg = _load_json_object("--config", args.config)
 
     applied: set = set()
     actions = {a.dest: a for a in p._actions}
     for key, value in cfg.items():
-        dest = key.replace("-", "_").lstrip("_")
+        dest = _json_key_dest(key)
+        if dest is None:
+            continue  # "_"-prefixed keys are comments, as in --optuna-space
         if dest == "config":
             continue  # a config file cannot chain-load another
         action = actions.get(dest)
@@ -380,10 +404,17 @@ def _apply_config(p: argparse.ArgumentParser, args: argparse.Namespace,
     return applied
 
 
-def parse_args(argv=None) -> argparse.Namespace:
+def parse_args(argv=None, overrides=None) -> argparse.Namespace:
+    """overrides: {dest: value} applied over the parsed argv and treated as
+    explicit - an Optuna trial's sampled values. Unlike appended argv
+    tokens, overrides can also express False for a store_true flag, so
+    sampled values beat the config file and presets for every type."""
     p = build_parser()
     args = p.parse_args(argv)
     explicit = _explicit_dests(sys.argv[1:] if argv is None else argv)
+    for dest, value in (overrides or {}).items():
+        setattr(args, dest, value)
+        explicit.add(dest)
     if args.config:
         explicit |= _apply_config(p, args, explicit)
     if args.h5 is None:
@@ -421,7 +452,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                 setattr(args, attr, preset[attr])
         if args.lr_min is None:
             args.lr_min = args.lr / preset["lr_min_div"]
-        if preset["rescue"]:
+        if preset["rescue"] and "rescue" not in explicit:
             args.rescue = True
     else:
         for attr, value in dict(epochs=50, patience=10, lr_cycle_epochs=10,
@@ -946,63 +977,101 @@ def _optuna_suggest(trial, name: str, spec: dict):
                      "(float, int, or categorical)")
 
 
-def _optuna_flags(parser: argparse.ArgumentParser, params: dict) -> list[str]:
-    """Sampled {dest: value} -> CLI tokens appended to the base argv, so the
-    normal precedence machinery (presets, config) applies to each trial."""
+def _check_spec(name: str, spec, action) -> None:
+    """Reject a malformed dimension spec BEFORE the study or its storage
+    exist, so a bad space never crashes inside trial 0."""
+    if not isinstance(spec, dict):
+        raise SystemExit(f"--optuna-space: '{name}': spec must be an object "
+                         "(type/low/high or choices)")
+    kind = spec.get("type", "float")
+    if kind == "categorical":
+        choices = spec.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise SystemExit(f"--optuna-space: '{name}': categorical needs "
+                             "a non-empty 'choices' list")
+        if action.choices is not None:
+            bad = [c for c in choices
+                   if c is not None and c not in action.choices]
+            if bad:
+                raise SystemExit(f"--optuna-space: '{name}': {bad} not in "
+                                 f"{sorted(action.choices)}")
+    elif kind in ("int", "float"):
+        low, high = spec.get("low"), spec.get("high")
+        for v in (low, high):
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                raise SystemExit(f"--optuna-space: '{name}': {kind} needs "
+                                 "numeric 'low' and 'high'")
+        if high < low:
+            raise SystemExit(f"--optuna-space: '{name}': low {low} exceeds "
+                             f"high {high}")
+    else:
+        raise SystemExit(f"--optuna-space: '{name}': unknown type '{kind}' "
+                         "(float, int, or categorical)")
+
+
+def _optuna_space(args, parser: argparse.ArgumentParser) -> dict:
+    """The search space, fully validated up front: shared key dialect
+    (dashes, comments), duplicate-spelling detection, option-name checks
+    with the USER'S spelling in messages, reserved options, spec shapes."""
     actions = {a.dest: a for a in parser._actions}
-    out: list[str] = []
-    for dest, value in params.items():
+    items = []  # (dest, raw_key, spec)
+    if args.optuna_space:
+        seen: dict[str, str] = {}
+        for raw, spec in _load_json_object("--optuna-space",
+                                           args.optuna_space).items():
+            dest = _json_key_dest(raw)
+            if dest is None:
+                if isinstance(spec, dict) and ({"type", "low", "choices"}
+                                               & set(spec)):
+                    print(f"note: --optuna-space key '{raw}' looks like a "
+                          "search dimension but leading-underscore keys "
+                          "are comments - ignored")
+                continue
+            if dest in seen:
+                raise SystemExit(f"--optuna-space: '{raw}' and '{seen[dest]}'"
+                                 f" both mean '{dest}' - keep one spelling")
+            seen[dest] = raw
+            items.append((dest, raw, spec))
+        if not items:
+            raise SystemExit("--optuna-space: no search dimensions found")
+    else:
+        items = [(k, k, v) for k, v in OPTUNA_DEFAULT_SPACE.items()]
+    for dest, raw, spec in items:
         action = actions.get(dest)
         if action is None or not action.option_strings:
-            raise SystemExit(f"--optuna-space: '{dest}' is not a train.py option")
-        if value is None:
-            continue
-        flag = next((o for o in action.option_strings if o.startswith("--")),
-                    action.option_strings[0])
-        if isinstance(action, argparse._StoreTrueAction):
-            if value:
-                out.append(flag)
-        elif isinstance(value, (list, tuple)):
-            out.append(flag)
-            out.extend(str(v) for v in value)
-        else:
-            out.extend([flag, str(value)])
-    return out
+            raise SystemExit(f"--optuna-space: '{raw}' is not a train.py "
+                             "option")
+        if dest in OPTUNA_RESERVED or dest in OPTUNA_KEYS:
+            raise SystemExit(f"--optuna-space: '{raw}' cannot be searched "
+                             "(the study manages it per trial)")
+        _check_spec(raw, spec, action)
+    return {dest: spec for dest, raw, spec in items}
 
 
 def run_optuna(args, argv: list[str]) -> None:
-    """Study of args.optuna trials; each trial re-parses the base argv plus
-    its sampled flags, trains into <out_dir>/trial_NNN (no PDF), and reports
-    per-epoch values for pruning. Results land in trials.csv and
-    best_trial.json; the best trial's config.json reproduces it."""
+    """Study of args.optuna trials. Sampled values are applied as parse-time
+    overrides (never argv tokens), so explicit CLI flags pin their option
+    out of the space while samples beat the config file and presets for
+    every value type; each trial records its EFFECTIVE post-parse values,
+    which is what trials.csv and best_trial.json report."""
     try:
         import optuna
     except ImportError:
         raise SystemExit("--optuna needs the optuna package: pip install optuna")
     parser = build_parser()
-    space = OPTUNA_DEFAULT_SPACE
-    if args.optuna_space:
-        loaded = json.loads(Path(args.optuna_space).read_text(encoding="utf-8"))
-        if not isinstance(loaded, dict):
-            raise SystemExit("--optuna-space: expected a JSON object")
-        # "_"-prefixed keys are comments; dashes and underscores both work
-        space = {k.replace("-", "_"): v for k, v in loaded.items()
-                 if not k.startswith("_")}
-        if not space:
-            raise SystemExit("--optuna-space: no search dimensions found")
-    _optuna_flags(parser, {k: 0 for k in space})  # validate option names now
+    space = _optuna_space(args, parser)
 
-    # Options passed explicitly on the study command line PIN their value:
-    # colliding dimensions leave the space, so a trial's recorded parameters
-    # always match what actually ran (a sampled store_true flag could not
-    # even be un-set past an explicit CLI flag). Config-file values stay
-    # searchable - per trial the precedence is CLI pin > sampled > config.
-    pinned = sorted(k for k in space if k in _explicit_dests(argv))
-    for k in pinned:
-        print(f"note: --{k.replace('_', '-')} is set on the command line - "
-              "removed from the search space (explicit flags pin their "
-              "value for every trial)")
-    space = {k: v for k, v in space.items() if k not in pinned}
+    def flag_of(dest):
+        a = next(a for a in parser._actions if a.dest == dest)
+        return next((o for o in a.option_strings if o.startswith("--")),
+                    a.option_strings[0])
+
+    explicit = _explicit_dests(argv)
+    pinned = sorted(k for k in space if k in explicit)
+    if pinned:
+        print("note: pinned by explicit CLI flags and removed from the "
+              "search space: " + ", ".join(flag_of(k) for k in pinned))
+    space = {k: v for k, v in space.items() if k not in explicit}
     if not space:
         raise SystemExit("every search dimension is pinned on the command "
                          "line; nothing left to search")
@@ -1021,17 +1090,32 @@ def run_optuna(args, argv: list[str]) -> None:
           + (f", {len(study.trials)} already recorded" if study.trials else "")
           + f"; searching {', '.join(space)}")
 
+    class TrialArgsError(Exception):
+        """A sampled combination the parser rejects - the trial FAILs and
+        the study continues instead of aborting with a stranded trial."""
+
     def objective(trial):
         params = {name: _optuna_suggest(trial, name, spec)
-                 for name, spec in space.items()}
+                  for name, spec in space.items()}
         trial_dir = base / f"trial_{trial.number:03d}"
-        flags = _optuna_flags(parser, params) + ["--out-dir", str(trial_dir),
-                                                  "--no-report"]
-        t_args = parse_args(argv + flags)
+        overrides = {k: v for k, v in params.items() if v is not None}
+        overrides["out_dir"] = str(trial_dir)
+        overrides["no_report"] = True
+        try:
+            t_args = parse_args(argv, overrides=overrides)
+        except SystemExit as e:
+            raise TrialArgsError(
+                f"trial {trial.number} parameters rejected by the parser: "
+                + ", ".join(f"{k}={v}" for k, v in params.items())) from e
         for k in OPTUNA_KEYS:  # the trial's config.json must not relaunch a study
             setattr(t_args, k, None if k != "optuna_no_prune" else False)
+        # what the trial ACTUALLY runs with (config/presets resolved; a
+        # sampled null falls back) - the honest record for every output
+        effective = {k: getattr(t_args, k) for k in list(space) + pinned}
+        trial.set_user_attr("effective", effective)
+        trial.set_user_attr("out_dir", str(trial_dir))
         print(f"\n=== trial {trial.number}: "
-              + ", ".join(f"{k}={v}" for k, v in params.items()) + " ===")
+              + ", ".join(f"{k}={effective[k]}" for k in space) + " ===")
 
         def on_epoch_end(epoch, op):
             trial.report(optuna_objective_value(op), epoch)
@@ -1041,7 +1125,6 @@ def run_optuna(args, argv: list[str]) -> None:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        trial.set_user_attr("out_dir", str(trial_dir))
         if result["stopped_early"] or result["best_metrics"] is None:
             raise optuna.TrialPruned()
         op = result["best_metrics"]
@@ -1051,17 +1134,25 @@ def run_optuna(args, argv: list[str]) -> None:
         trial.set_user_attr("target_met", bool(op["target_met"]))
         return optuna_objective_value(op)
 
-    study.optimize(objective, n_trials=args.optuna, gc_after_trial=True)
+    study.optimize(objective, n_trials=args.optuna, gc_after_trial=True,
+                   catch=(TrialArgsError,))
 
-    names = list(space)
+    # columns: this run's dimensions and pins first, then anything older
+    # recorded trials searched (a resumed study may have sampled an option
+    # that is pinned now - its history must not vanish from the report)
+    names = list(space) + sorted(
+        {n for t_ in study.trials
+         for n in set(t_.params) | set(t_.user_attrs.get("effective", {}))}
+        - set(space))
     with open(base / "trials.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["trial", "state", "value", *names, "best_epoch", "recall",
                     "specificity", "target_met", "out_dir"])
         for t in study.trials:
+            eff = t.user_attrs.get("effective", {})
             w.writerow([t.number, t.state.name,
                         "" if t.value is None else f"{t.value:.6f}",
-                        *[t.params.get(n, "") for n in names],
+                        *[eff.get(n, t.params.get(n, "")) for n in names],
                         *[t.user_attrs.get(k, "") for k in
                           ("best_epoch", "recall", "specificity", "target_met",
                            "out_dir")]])
@@ -1075,7 +1166,9 @@ def run_optuna(args, argv: list[str]) -> None:
         return
     best = study.best_trial
     best_dir = Path(best.user_attrs["out_dir"])
+    best_eff = best.user_attrs.get("effective", best.params)
     summary = {"trial": best.number, "value": best.value, "params": best.params,
+               "effective": best_eff,
                "best_epoch": best.user_attrs.get("best_epoch"),
                "recall": best.user_attrs.get("recall"),
                "specificity": best.user_attrs.get("specificity"),
@@ -1087,7 +1180,7 @@ def run_optuna(args, argv: list[str]) -> None:
           f"(recall {summary['recall']:.4f}, specificity "
           f"{summary['specificity']:.4f}, target "
           f"{'met' if summary['target_met'] else 'NOT met'})")
-    print("  " + ", ".join(f"{k}={v}" for k, v in best.params.items()))
+    print("  " + ", ".join(f"{k}={v}" for k, v in best_eff.items()))
     print(f"  reproduce: python train.py --config {best_dir / 'config.json'}")
     print(f"  summary: {base / 'best_trial.json'}")
 

@@ -298,7 +298,9 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
   <div class="arg" id="t-config">
     <div class="arg-head"><span class="flag">--config</span><span class="badge">path (.json)</span><span class="badge">default: none</span></div>
     <p>A JSON file of options — keys are the long option names (dashes or
-    underscores both accepted), including the dataset path as
+    underscores both accepted, leading dashes allowed; keys starting with
+    <code>_</code> are ignored as comments, the same dialect as
+    <code>--optuna-space</code>), including the dataset path as
     <code>"h5"</code>. Precedence, highest first: <strong>explicit CLI flags &gt;
     config file &gt; --smart level presets &gt; built-in defaults</strong> — so a
     config captures an experiment while any flag on the command line still
@@ -868,12 +870,19 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   into a study of N trials: each trial re-parses your base command line plus
   its sampled flags — so presets, <code>--config</code>, and the usual
   precedence apply. Per trial the hierarchy is <strong>explicit CLI flags &gt;
-  sampled space &gt; config file &gt; presets &gt; defaults</strong>: an option
-  you pass explicitly on the study command line (say <code>--amp
-  --batch-size 96</code>) is <em>pinned</em> for every trial — a space
-  dimension naming it is dropped with a printed note, so a trial's recorded
-  parameters always match what actually ran — while config-file values stay
-  searchable. Each trial trains into
+  sampled space &gt; config file &gt; presets &gt; defaults</strong>, and it
+  holds for every value type: sampled values are applied as parse-time
+  overrides rather than command-line tokens, so a sampled <code>false</code>
+  genuinely turns a config-enabled switch off. An option you pass explicitly
+  on the study command line (say <code>--amp --batch-size 96</code>) is
+  <em>pinned</em> for every trial — colliding dimensions are dropped with a
+  single printed note — and each trial records its <strong>effective</strong>
+  post-parse values (config and presets resolved), which is what
+  <code>trials.csv</code> and <code>best_trial.json</code> report, so
+  recorded parameters always match what actually ran. A sampled combination
+  the parser rejects (e.g. <code>ramp-epochs</code> under
+  <code>--smart</code>) marks that one trial FAILED and the study continues.
+  Each trial trains into
   <code>&lt;out-dir&gt;/trial_NNN</code> (no per-trial PDF). The study
   <strong>maximizes hard-negative specificity at the recall target</strong>:
   a trial that meets the target scores its specificity; one that doesn't
@@ -902,13 +911,20 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   <div class="arg" id="t-optuna-space">
     <div class="arg-head"><span class="flag">--optuna-space</span><span class="badge">path (.json)</span><span class="badge">default: built-in space</span></div>
     <p>JSON object of <code>{option: spec}</code> where option is any train.py
-    option name (dashes or underscores; keys starting with <code>_</code> are
-    ignored, so the file can carry comments) and spec is <code>{"type":
+    option name (dashes or underscores, leading dashes allowed — the same key
+    dialect as <code>--config</code>; keys starting with <code>_</code> are
+    comments in both files, with a note printed if a comment key carries what
+    looks like a real spec) and spec is <code>{"type":
     "float"|"int"|"categorical", "low", "high", "log", "step", "choices"}</code>;
     a <code>null</code> choice leaves the option at its config/preset
-    value. Option names are validated before the first trial, and dimensions
-    colliding with an explicit CLI flag are removed with a printed note (the
-    flag pins its value — searching every dimension away errors out). The built-in
+    value. The whole space is validated <em>before</em> the study or its
+    storage exist: option names (reported in your spelling), duplicate
+    spellings that collapse to one option, spec shapes (types, low/high,
+    non-empty choices, categorical choices checked against the option's own
+    choices), and reserved options the study manages per trial (h5, config,
+    out-dir, no-report, resume, the optuna flags). Dimensions colliding with
+    an explicit CLI flag are removed with a printed note (the flag pins its
+    value — pinning every dimension away errors out). The built-in
     space searches <code>lr</code> (log 1e-5..1e-2), <code>weight-decay</code>
     (log 1e-6..1e-2), <code>optimizer</code>, <code>focal-gamma</code>
     (0.5..4), <code>hn-alpha-end</code> (0.1..1) and <code>recall-first</code>

@@ -1,5 +1,5 @@
 {
-  "_comment": "Search space for `python train.py DATA.h5 --optuna N --optuna-space example_optuna_space.json`. Keys are train.py option names (dashes or underscores); every other option stays at its CLI/config/preset value. Types: float (low/high, optional log/step), int (low/high, optional step/log), categorical (choices; null leaves the option unset). This file mirrors the built-in default space.",
+  "_comment": "Search space for `python train.py DATA.h5 --optuna N --optuna-space example_optuna_space.json`. Keys are train.py option names (dashes or underscores; leading-underscore keys like this one are comments); every other option stays at its config/preset value, and an option passed explicitly on the study command line pins its value (the dimension leaves the space). Types: float (low/high, optional log/step), int (low/high, optional step/log), categorical (choices; null leaves the option unset). This file mirrors the built-in default space.",
   "lr": {"type": "float", "low": 1e-5, "high": 1e-2, "log": true},
   "weight_decay": {"type": "float", "low": 1e-6, "high": 1e-2, "log": true},
   "optimizer": {"type": "categorical", "choices": ["adamw", "sgd"]},
