@@ -36,7 +36,7 @@ from tqdm import tqdm
 from checkpoints import checkpoint_name, find_checkpoint, prune_role
 from controller import SmartController
 from dataset import (AUGMENTATIONS, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
-                     validate_h5)
+                     load_augmentation_plugins, validate_h5)
 from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
@@ -312,6 +312,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="run every trial to completion")
 
     d = p.add_argument_group("data")
+    d.add_argument("--augment-plugin", action="append", default=None,
+                   metavar="FILE.py",
+                   help="Python file defining extra augmentations (an "
+                        "AUGMENTATIONS dict of {name: factory}, optional "
+                        "POST_RESIZE set) merged into the built-in catalog "
+                        "before --augment specs are resolved; repeatable. "
+                        "See example_augment_plugin.py")
     d.add_argument("--imagenet-norm", action="store_true",
                    help="ImageNet mean/std normalization (default: just /255)")
     d.add_argument("--augment", nargs="+", default=None,
@@ -643,6 +650,11 @@ def train(args, on_epoch_end=None) -> dict:
         json.dumps({k: v for k, v in vars(args).items() if k != "config"},
                    indent=2, default=str),
         encoding="utf-8")
+
+    if args.augment_plugin:
+        plugged = load_augmentation_plugins(args.augment_plugin)
+        if plugged:
+            print("augmentation plugins:", ", ".join(plugged))
 
     summary = validate_h5(args.h5)
     classes = summary["classes"]

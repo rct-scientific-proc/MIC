@@ -269,6 +269,16 @@ def main() -> None:
     else:
         print("optuna not installed - search leg skipped")
 
+    # custom augmentations shipped as a plugin file: the example plugin's
+    # entries (incl. a post-resize one) must train an epoch end to end
+    run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+        "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
+        "--out-dir", OUT_ROOT / "run_plugin", "--no-report", "--patience",
+        "0", "--augment-plugin", REPO / "example_augment_plugin.py",
+        "--augment", "hflip:p=1.0", "gaussnoise:p=1.0,sigma=5",
+        "gridmask:p=1.0", "--seed", "1", "--no-progress", *GPU_TRAIN)
+    assert (OUT_ROOT / "run_plugin" / "metrics.csv").exists()
+
     # gui: optional PyQt5 front-end - the self-test renders offscreen and
     # asserts the commands each tab builds (without PyQt5, the entry point
     # must print the install hint instead of a traceback)

@@ -1069,6 +1069,89 @@ policy      autoaugment (ImageNet policy, no params)
     expect slower score convergence); the chosen list is stored in the
     checkpoint config and shown in the report's reconstructed command.</p>
   </div>
+
+  <div class="arg" id="t-augment-plugin">
+    <div class="arg-head"><span class="flag">--augment-plugin</span><span class="badge">FILE.py · repeatable</span><span class="badge">default: none</span></div>
+    <p>Ship your <strong>own augmentations</strong> without touching the
+    pipeline code: point this at a Python file and its entries merge into
+    the built-in catalog before your <code>--augment</code> specs are
+    resolved — they get the identical <code>name:key=value</code> CLI
+    syntax, config-JSON objects, and up-front validation. The flag repeats
+    for several files; names must not collide with the built-ins or with
+    another plugin (a hard error, so a plugin can never silently redefine
+    <code>rotation</code>). <code>example_augment_plugin.py</code> in the
+    repo root is a working, heavily commented template.</p>
+
+    <p><strong>Anatomy of a plugin file.</strong> Two module-level names,
+    one required:</p>
+    <div class="formula">AUGMENTATIONS   required: {name: factory} — same shape as the built-in catalog
+POST_RESIZE     optional: set of names that run AFTER resize/normalize</div>
+
+    <p><strong>The factory and its inputs.</strong> Each factory is a
+    callable whose <em>keyword arguments (with defaults) are the
+    augmentation's user-settable parameters</em> — that signature IS the
+    interface. Writing
+    <code>"gaussnoise": lambda p=0.5, sigma=10.0: …</code> makes
+    <code>--augment gaussnoise:p=0.8,sigma=12</code> work immediately, an
+    unknown key like <code>sigm=</code> dies up front listing
+    <code>['p', 'sigma']</code>, and a range written <code>lo-hi</code>
+    (e.g. <code>scale=0.05-0.2</code>) arrives as the tuple
+    <code>(0.05, 0.2)</code>. By convention expose <code>p</code> and wrap
+    the transform in <code>v2.RandomApply</code> (see the <code>_maybe</code>
+    helper in the example) so <code>p=1</code> means "always apply", like
+    every built-in.</p>
+
+    <p><strong>The transform and its input tensor.</strong> The factory
+    returns any callable mapping an image tensor to an image tensor — a
+    stock torchvision <code>v2</code> transform, your own
+    <code>torch.nn.Module</code>, or <code>v2.Lambda</code>. What it
+    receives depends on the stage:</p>
+    <div class="formula">pre-resize (default)      CHW uint8, source resolution, values 0–255
+                          (1 channel for a grayscale dataset, else 3);
+                          return the SAME dtype and layout
+post-resize (POST_RESIZE) CHW float32, 224x224, scaled to [0,1] —
+                          ImageNet-normalized when --imagenet-norm is on;
+                          use it when the effect must be consistent at
+                          model scale (the built-in erasing lives here)</div>
+
+    <p><strong>Guarantees that carry over.</strong> Plugin augmentations
+    are training-split only (validation/evaluation/inference stay clean),
+    obey the order given in <code>--augment</code>, and are recorded in the
+    run's <code>config.json</code> together with the plugin path — ship the
+    <code>.py</code> next to the config and
+    <code>python train.py --config …</code> reproduces the run, plugins
+    included. An Optuna study loads each plugin once, not once per trial.
+    The same label-preservation caution as above applies doubly to custom
+    ops: an augmentation is only valid if the transformed snippet still
+    deserves its label.</p>
+
+    <p><strong>Minimal complete example</strong> (the repo's
+    <code>example_augment_plugin.py</code> adds fuller comments):</p>
+    <div class="formula">import torch
+from torchvision.transforms import v2
+
+def _maybe(p, t):
+    return t if p &gt;= 1 else v2.RandomApply([t], p=p)
+
+class GaussianNoise(torch.nn.Module):
+    def __init__(self, sigma):
+        super().__init__()
+        self.sigma = float(sigma)
+    def forward(self, img):  # uint8 in, uint8 out (pre-resize stage)
+        noise = torch.randn_like(img, dtype=torch.float32) * self.sigma
+        return (img.float() + noise).clamp(0, 255).to(img.dtype)
+
+AUGMENTATIONS = {
+    "hflip":      lambda p=0.5: v2.RandomHorizontalFlip(p=p),
+    "gaussnoise": lambda p=0.5, sigma=10.0: _maybe(p, GaussianNoise(sigma)),
+    "gridmask":   lambda p=0.3, scale=(0.02, 0.1), value=0.5:
+                      v2.RandomErasing(p=p, scale=scale, value=value),
+}
+POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</div>
+    <p>Run it:
+    <code>python train.py data.h5 --augment-plugin example_augment_plugin.py
+    --augment hflip gaussnoise:p=0.8,sigma=12 gridmask:scale=0.05-0.2</code></p>
+  </div>
 </section>
 
 <section class="tool" id="evaluate">

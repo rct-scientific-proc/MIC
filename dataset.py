@@ -12,6 +12,8 @@ only image reads go through the lazy handle.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import torch
 import h5py
@@ -77,6 +79,59 @@ AUGMENTATIONS = {
 # entries applied after the resize/normalize transform (float tensors);
 # everything else runs before it, on the raw uint8 crop
 POST_RESIZE = {"erasing"}
+
+_LOADED_PLUGINS: set[str] = set()
+
+
+def load_augmentation_plugins(paths) -> list[str]:
+    """Merge user augmentation modules into the catalog (--augment-plugin).
+
+    Each file is executed as a module and must define AUGMENTATIONS
+    ({name: factory}) using the same contract as the built-ins; an optional
+    POST_RESIZE set names entries that run after resize/normalize. Names
+    must not collide with built-ins or other plugins. Idempotent per file
+    (an Optuna study loads plugins once, not once per trial). Returns the
+    catalog names the given files provide."""
+    import importlib.util
+
+    added: list[str] = []
+    for i, path in enumerate(paths or []):
+        p = Path(path)
+        if not p.is_file():
+            raise SystemExit(f"--augment-plugin: {p} not found")
+        key = str(p.resolve())
+        if key in _LOADED_PLUGINS:
+            continue
+        spec = importlib.util.spec_from_file_location(
+            f"_mic_augment_plugin_{i}_{p.stem}", p)
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            raise SystemExit(f"--augment-plugin: {p} failed to import: {e}")
+        catalog = getattr(mod, "AUGMENTATIONS", None)
+        if not isinstance(catalog, dict) or not catalog:
+            raise SystemExit(f"--augment-plugin: {p} must define a non-empty "
+                             "AUGMENTATIONS dict of {name: factory}")
+        post = set(getattr(mod, "POST_RESIZE", ()))
+        for name in post - set(catalog):
+            raise SystemExit(f"--augment-plugin: {p}: POST_RESIZE names "
+                             f"'{name}', which its AUGMENTATIONS does not "
+                             "define")
+        for name, factory in catalog.items():
+            if not callable(factory):
+                raise SystemExit(f"--augment-plugin: {p}: '{name}' must map "
+                                 "to a factory callable")
+            if name in AUGMENTATIONS:
+                raise SystemExit(f"--augment-plugin: {p}: '{name}' already "
+                                 "exists (built-in or another plugin) - "
+                                 "pick a distinct name")
+        for name, factory in catalog.items():
+            AUGMENTATIONS[name] = factory
+            added.append(name)
+        POST_RESIZE.update(post)
+        _LOADED_PLUGINS.add(key)
+    return added
 
 
 def _parse_value(v: str):
