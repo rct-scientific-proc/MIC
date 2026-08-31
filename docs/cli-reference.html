@@ -646,6 +646,32 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     boost).</p>
   </div>
 
+  <div class="arg" id="t-class-alpha-auto">
+    <div class="arg-head"><span class="flag">--class-alpha-auto</span><span class="badge">BETA · optional value</span><span class="badge">default: off · bare flag = 0.999</span></div>
+    <p>Derive the genuine classes' focal alphas from their training-split
+    counts using the <strong>effective number of samples</strong> (Cui et
+    al., CVPR 2019) instead of hand-tuning: each class gets weight
+    <code>(1 − β) / (1 − β<sup>n</sup>)</code>, normalized to mean 1 so the
+    overall loss scale matches the all-ones default. The idea: the value of
+    each additional sample diminishes as a class grows (new samples
+    increasingly overlap what the model already learned), so the
+    "effective" count saturates — rare classes get proportionally more
+    weight, but less aggressively than raw inverse frequency, which
+    over-corrects. <code>β</code> sets where saturation kicks in:
+    <code>0</code> is uniform (no correction), <code>0.99</code> mild,
+    <code>0.999</code> (the bare-flag default) moderate, and values
+    approaching 1 converge to inverse-frequency weighting. The computed
+    alphas are printed at startup and logged per epoch in
+    <code>class_thresholds.csv</code>.</p>
+    <p>Composition: <code>--class-alpha NAME=VALUE</code> still overrides
+    single classes (manual beats auto), rescue boosts stack on top as
+    max(alpha, boost), and the hard-negative class stays governed by
+    <code>--hn-alpha</code> and the pressure ramp. <code>β</code> is a good
+    <code>--optuna-space</code> dimension (float, 0–0.9999) when you'd
+    rather search it than pick it. Classes absent from the training split
+    keep the default alpha of 1.</p>
+  </div>
+
   <h3>Hard-negative pressure ramp</h3>
   <p class="syn">One coordinated schedule for "start recall-focused, then turn up the
   pressure". Both endpoints interpolate linearly over <code>--ramp-epochs</code>

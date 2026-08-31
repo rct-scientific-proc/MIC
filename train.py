@@ -197,6 +197,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="manual focal alpha for a genuine class, e.g. "
                         "--class-alpha band3=2.0 (repeatable; works in any "
                         "mode; rescue boosts apply on top as max(manual, boost))")
+    o.add_argument("--class-alpha-auto", type=float, nargs="?", const=0.999,
+                   default=None, metavar="BETA",
+                   help="derive the genuine classes' focal alphas from their "
+                        "training-split counts via the effective number of "
+                        "samples (Cui et al. 2019): weight = "
+                        "(1-beta)/(1-beta^n), normalized to mean 1 so the "
+                        "loss scale stays comparable. Bare flag = beta "
+                        "0.999; beta 0 = uniform, closer to 1 = closer to "
+                        "inverse-frequency. --class-alpha NAME=VALUE still "
+                        "overrides single classes, and rescue boosts stack "
+                        "on top")
     o.add_argument("--imbalance-ratio", type=float, default=math.inf,
                    help="max hard negatives per epoch = ratio * genuine count (1..inf)")
     o.add_argument("--focal-gamma", type=float, default=2.0)
@@ -433,6 +444,8 @@ def parse_args(argv=None, overrides=None) -> argparse.Namespace:
     if args.rescue and not args.smart:
         p.error("--rescue requires --smart (rescue decisions run at cycle "
                 "troughs)")
+    if args.class_alpha_auto is not None and not 0 <= args.class_alpha_auto < 1:
+        p.error("--class-alpha-auto: beta must be in [0, 1)")
     if args.optuna is not None and args.optuna < 1:
         p.error("--optuna expects a positive trial count")
     if args.optuna and args.resume:
@@ -470,6 +483,25 @@ def parse_args(argv=None, overrides=None) -> argparse.Namespace:
         if args.lr_min is None:
             args.lr_min = args.lr / 25
     return args
+
+
+def effective_number_alphas(labels, hn_index, beta: float,
+                            n_classes: int) -> dict[int, float]:
+    """Class-balanced focal alphas for the genuine classes from the
+    effective number of samples (Cui et al., CVPR 2019): weight_c =
+    (1 - beta) / (1 - beta^n_c), normalized to mean 1 over the classes
+    present so the overall loss scale matches the all-ones default.
+    beta = 0 is uniform; beta -> 1 approaches inverse frequency. Classes
+    absent from the training split keep the default alpha of 1."""
+    weights = {}
+    for c in range(n_classes):
+        if c == hn_index:
+            continue
+        n = int((labels == c).sum())
+        if n > 0:
+            weights[c] = (1.0 - beta) / (1.0 - beta ** n) if beta > 0 else 1.0
+    mean = sum(weights.values()) / max(len(weights), 1)
+    return {c: w / mean for c, w in weights.items()}
 
 
 def parse_class_alphas(pairs, classes, hn_index) -> dict[int, float]:
@@ -692,7 +724,15 @@ def train(args, on_epoch_end=None) -> dict:
     optimizer = build_optimizer(args, model)
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
 
-    base_alphas = parse_class_alphas(args.class_alpha, classes, hn_index)
+    base_alphas = {}
+    if args.class_alpha_auto is not None:
+        base_alphas = effective_number_alphas(
+            train_ds.labels, hn_index, args.class_alpha_auto, len(classes))
+        print(f"effective-number alphas (beta {args.class_alpha_auto:g}): "
+              + ", ".join(f"{classes[c]}={a:.3f}"
+                          for c, a in sorted(base_alphas.items())))
+    # manual --class-alpha entries override their class's auto value
+    base_alphas.update(parse_class_alphas(args.class_alpha, classes, hn_index))
     if base_alphas:
         criterion.set_class_alphas(
             {c: base_alphas.get(c, 1.0) for c in range(len(classes))

@@ -274,7 +274,8 @@ def main() -> None:
     run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
         "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
         "--out-dir", OUT_ROOT / "run_plugin", "--no-report", "--patience",
-        "0", "--augment-plugin", REPO / "example_augment_plugin.py",
+        "0", "--class-alpha-auto", "0.99",
+        "--augment-plugin", REPO / "example_augment_plugin.py",
         "--augment", "hflip:p=1.0", "gaussnoise:p=1.0,sigma=5",
         "gridmask:p=1.0", "coldrop:p=1.0,frac=0.2", "--seed", "1", "--no-progress", *GPU_TRAIN)
     assert (OUT_ROOT / "run_plugin" / "metrics.csv").exists()
