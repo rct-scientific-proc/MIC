@@ -276,7 +276,7 @@ def main() -> None:
         "--out-dir", OUT_ROOT / "run_plugin", "--no-report", "--patience",
         "0", "--augment-plugin", REPO / "example_augment_plugin.py",
         "--augment", "hflip:p=1.0", "gaussnoise:p=1.0,sigma=5",
-        "gridmask:p=1.0", "--seed", "1", "--no-progress", *GPU_TRAIN)
+        "gridmask:p=1.0", "coldrop:p=1.0,frac=0.2", "--seed", "1", "--no-progress", *GPU_TRAIN)
     assert (OUT_ROOT / "run_plugin" / "metrics.csv").exists()
 
     # gui: optional PyQt5 front-end - the self-test renders offscreen and

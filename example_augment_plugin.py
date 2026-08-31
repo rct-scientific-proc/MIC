@@ -47,6 +47,24 @@ def _maybe(p, transform):
     return transform if p >= 1 else v2.RandomApply([transform], p=p)
 
 
+class ColumnDropout(torch.nn.Module):
+    """Zero out whole columns of the crop (pre-resize): every column is
+    dropped independently with probability `frac`, so `frac` is also the
+    expected fraction of columns zeroed (frac=0.2 blanks ~20% of them).
+    Simulates dead sensor columns / scan-line dropouts."""
+
+    def __init__(self, frac: float):
+        super().__init__()
+        self.frac = float(frac)
+
+    def forward(self, img):
+        drop = torch.rand(img.shape[-1]) < self.frac  # one draw per column
+        if drop.any():
+            img = img.clone()
+            img[..., drop] = 0
+        return img
+
+
 class GaussianNoise(torch.nn.Module):
     """Additive gaussian pixel noise on the raw uint8 crop (pre-resize):
     computed in float, clamped, and returned as uint8 again."""
@@ -66,6 +84,10 @@ AUGMENTATIONS = {
     # a custom torch.nn.Module wrapped in the probability gate; `sigma`
     # becomes CLI-settable, e.g. gaussnoise:p=0.8,sigma=12
     "gaussnoise": lambda p=0.5, sigma=10.0: _maybe(p, GaussianNoise(sigma)),
+    # two probabilities: p gates whether the transform applies at all,
+    # frac is each column's chance of being zeroed when it does,
+    # e.g. coldrop:p=0.5,frac=0.2
+    "coldrop": lambda p=0.5, frac=0.1: _maybe(p, ColumnDropout(frac)),
     # a post-resize entry (listed in POST_RESIZE below): gray patches at
     # model scale, e.g. gridmask:p=0.5,scale=0.05-0.2
     "gridmask": lambda p=0.3, scale=(0.02, 0.1), value=0.5:
