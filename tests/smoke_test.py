@@ -269,6 +269,19 @@ def main() -> None:
     else:
         print("optuna not installed - search leg skipped")
 
+    # gui: optional PyQt5 front-end - the self-test renders offscreen and
+    # asserts the commands each tab builds (without PyQt5, the entry point
+    # must print the install hint instead of a traceback)
+    if importlib.util.find_spec("PyQt5") is not None:
+        run(REPO / "gui.py", "--self-test", OUT_ROOT / "gui")
+        assert (OUT_ROOT / "gui" / "train_tab.png").exists()
+    else:
+        r = subprocess.run([sys.executable, str(REPO / "gui.py")],
+                           capture_output=True, text=True, cwd=REPO)
+        assert "pip install PyQt5" in r.stdout + r.stderr, \
+            "missing-PyQt5 hint not printed"
+        print("PyQt5 not installed - gui install hint verified")
+
     print(f"\noutputs kept in {OUT_ROOT}")
     print("SMOKE TEST PASSED")
 

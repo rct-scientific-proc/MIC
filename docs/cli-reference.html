@@ -218,10 +218,11 @@
     <a href="#train">1 · train.py</a>
     <a href="#evaluate">2 · evaluate.py</a>
     <a href="#inference">3 · inference.py</a>
-    <a href="#download">4 · download_weights.py</a>
-    <a href="#synth">5 · dataset tooling (generate &amp; optimize)</a>
-    <a href="#outputs">6 · Outputs: CSV &amp; checkpoints</a>
-    <a href="#recipes">7 · Recipes</a>
+    <a href="#gui">4 · gui.py (optional)</a>
+    <a href="#download">5 · download_weights.py</a>
+    <a href="#synth">6 · dataset tooling (generate &amp; optimize)</a>
+    <a href="#outputs">7 · Outputs: CSV &amp; checkpoints</a>
+    <a href="#recipes">8 · Recipes</a>
   </nav>
 </header>
 
@@ -1344,8 +1345,41 @@ policy      autoaugment (ImageNet policy, no params)
   zero detections appear only in the summary table.</div>
 </section>
 
-<section class="tool" id="download">
+<section class="tool" id="gui">
   <span class="eyebrow">Section 4</span>
+  <h2>gui.py — optional PyQt5 front-end</h2>
+  <p class="syn"><code>python gui.py</code> — a thin command builder and
+  runner over the three CLIs, for anyone who prefers forms to flags. It
+  never re-implements the pipeline: each tab (<strong>Train</strong> /
+  <strong>Evaluate</strong> / <strong>Inference</strong>) assembles the
+  exact <code>python train.py …</code> command — shown live in a
+  <strong>command preview</strong> bar as you edit — then launches it as a
+  subprocess and streams its console output into the log pane; Stop kills
+  the run. Because the GUI only builds commands, everything the CLIs
+  guarantee (preset precedence, stored thresholds, reports, optuna
+  pinning) behaves identically, and the preview doubles as a way to learn
+  the flags.</p>
+  <p>Design choices: only the everyday options get form fields — dataset,
+  checkpoint, output paths with file/dir pickers; architecture, smart and
+  recall-first levels, optimizer, device, split, window/stride geometry,
+  GT file, optuna trials + space — and anything else goes in the per-tab
+  <strong>extra CLI args</strong> box, so every option stays reachable
+  without form sprawl. Fields left at their placeholder are
+  <em>omitted</em> from the command: the CLIs' own defaults and presets
+  stay in charge, and nothing is accidentally pinned for an optuna study.
+  Field values persist between launches. Progress bars are disabled
+  (<code>--no-progress</code>) since tqdm garbles a text pane; the
+  per-epoch lines still stream live.</p>
+  <p>PyQt5 is an <strong>optional</strong> dependency, exactly like
+  optuna: without it, <code>python gui.py</code> prints the install hint
+  (<code>pip install PyQt5</code>) and exits. <code>--self-test DIR</code>
+  renders the window offscreen, asserts the commands each tab builds, and
+  saves tab screenshots — the smoke suite runs it whenever PyQt5 is
+  installed.</p>
+</section>
+
+<section class="tool" id="download">
+  <span class="eyebrow">Section 5</span>
   <h2>download_weights.py</h2>
   <p class="syn"><code>python download_weights.py [options]</code> — pre-fetches the
   ImageNet <code>.pth</code> files on a connected machine so offline boxes can train
@@ -1369,7 +1403,7 @@ policy      autoaugment (ImageNet policy, no params)
 </section>
 
 <section class="tool" id="synth">
-  <span class="eyebrow">Section 5</span>
+  <span class="eyebrow">Section 6</span>
   <h2>tests/make_synthetic_h5.py</h2>
   <p class="syn"><code>python tests/make_synthetic_h5.py OUT.h5 [options]</code> —
   generates a small learnable dataset in the exact <code>h5_format.md</code> layout.
@@ -1482,7 +1516,7 @@ policy      autoaugment (ImageNet policy, no params)
 </section>
 
 <section class="tool" id="outputs">
-  <span class="eyebrow">Section 6</span>
+  <span class="eyebrow">Section 7</span>
   <h2>Outputs: metrics.csv &amp; checkpoint contents</h2>
 
   <h3>metrics.csv columns</h3>
@@ -1571,7 +1605,7 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
 </section>
 
 <section class="tool" id="recipes">
-  <span class="eyebrow">Section 7</span>
+  <span class="eyebrow">Section 8</span>
   <h2>Recipes</h2>
 
   <h3>Standard run on a real dataset</h3>
