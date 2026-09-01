@@ -219,10 +219,11 @@
     <a href="#evaluate">2 · evaluate.py</a>
     <a href="#inference">3 · inference.py</a>
     <a href="#gui">4 · gui.py (optional)</a>
-    <a href="#download">5 · download_weights.py</a>
-    <a href="#synth">6 · dataset tooling (generate &amp; optimize)</a>
-    <a href="#outputs">7 · Outputs: CSV &amp; checkpoints</a>
-    <a href="#recipes">8 · Recipes</a>
+    <a href="#curate">5 · curate.py (optional)</a>
+    <a href="#download">6 · download_weights.py</a>
+    <a href="#synth">7 · dataset tooling (generate &amp; optimize)</a>
+    <a href="#outputs">8 · Outputs: CSV &amp; checkpoints</a>
+    <a href="#recipes">9 · Recipes</a>
   </nav>
 </header>
 
@@ -1487,8 +1488,45 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
   installed.</p>
 </section>
 
-<section class="tool" id="download">
+<section class="tool" id="curate">
   <span class="eyebrow">Section 5</span>
+  <h2>curate.py — snippet curation GUI (optional)</h2>
+  <p class="syn"><code>python curate.py DATA.h5</code> — browse a training
+  file's snippets <strong>by class and split</strong>, inspect them
+  (double-click for a large preview), and <strong>remove bad ones from
+  training entirely</strong>. The left panel selects the split and a class
+  (with live counts, including how many of each class are removed); the
+  grid pages through thumbnails 200 at a time with multi-select, and
+  <kbd>Del</kbd> or the Remove button flags the selection. Like the run
+  GUI, PyQt5 is optional: without it the entry point prints
+  <code>pip install PyQt5</code>.</p>
+  <p><strong>How removal is stored.</strong> Save never rewrites the
+  (possibly multi-GB, contiguous) images dataset — it writes an optional
+  <code>removed</code> boolean dataset into the h5 (created on first save;
+  now part of <code>h5_format.md</code>). Every consumer honors the mask
+  from then on: <code>H5SnippetDataset</code> excludes flagged rows from
+  <strong>every</strong> split (a mislabeled snippet poisons validation
+  thresholds as much as training), <code>validate_h5</code> reports
+  per-split removed counts, and training/evaluation/reports therefore see
+  the curated dataset automatically — no retraining flag needed. Removed
+  snippets stay stored in the file: the <strong>[removed]</strong> view
+  lists them across all splits (captioned with their class and split) and
+  Restore puts them back, so curation is always reversible. Unsaved
+  changes are marked in the title bar and prompted for on close.</p>
+  <p><strong>Purging permanently.</strong> When you want the flagged rows
+  actually gone, <code>python optimize_h5.py in.h5 out.h5
+  --drop-removed</code> rewrites the file without them (all aligned
+  datasets filtered together, no <code>removed</code> dataset in the
+  output); a plain optimize pass without the flag carries the mask over
+  unchanged, so optimizing never loses curation.</p>
+  <p><code>--self-test DIR</code> runs an offscreen remove/save/restore
+  round-trip against the given h5 (left clean) with screenshots — the
+  smoke suite exercises it on a copy of its dataset whenever PyQt5 is
+  installed.</p>
+</section>
+
+<section class="tool" id="download">
+  <span class="eyebrow">Section 6</span>
   <h2>download_weights.py</h2>
   <p class="syn"><code>python download_weights.py [options]</code> — pre-fetches the
   ImageNet <code>.pth</code> files on a connected machine so offline boxes can train
@@ -1512,7 +1550,7 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
 </section>
 
 <section class="tool" id="synth">
-  <span class="eyebrow">Section 6</span>
+  <span class="eyebrow">Section 7</span>
   <h2>tests/make_synthetic_h5.py</h2>
   <p class="syn"><code>python tests/make_synthetic_h5.py OUT.h5 [options]</code> —
   generates a small learnable dataset in the exact <code>h5_format.md</code> layout.
@@ -1625,7 +1663,7 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
 </section>
 
 <section class="tool" id="outputs">
-  <span class="eyebrow">Section 7</span>
+  <span class="eyebrow">Section 8</span>
   <h2>Outputs: metrics.csv &amp; checkpoint contents</h2>
 
   <h3>metrics.csv columns</h3>
@@ -1714,7 +1752,7 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
 </section>
 
 <section class="tool" id="recipes">
-  <span class="eyebrow">Section 8</span>
+  <span class="eyebrow">Section 9</span>
   <h2>Recipes</h2>
 
   <h3>Standard run on a real dataset</h3>

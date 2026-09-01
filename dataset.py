@@ -253,6 +253,12 @@ def validate_h5(path: str) -> dict:
         labels = f["labels"][:]
         gt = f["gt"][:].astype(bool)
         split = f["split"][:]
+        removed = np.zeros(n, dtype=bool)
+        if "removed" in f:  # optional curation mask (curate.py)
+            if f["removed"].shape[0] != n:
+                raise ValueError(f"{path}: 'removed' length "
+                                 f"{f['removed'].shape[0]} != images length {n}")
+            removed = f["removed"][:].astype(bool)
 
         if labels.max(initial=0) >= len(classes):
             raise ValueError(f"{path}: label index out of range of classes")
@@ -267,10 +273,11 @@ def validate_h5(path: str) -> dict:
 
         counts = {}
         for value, name in SPLIT_NAMES.items():
-            mask = split == value
+            mask = (split == value) & ~removed
             counts[name] = {
                 "genuine": int((mask & gt).sum()),
                 "hard_negative": int((mask & ~gt).sum()),
+                "removed": int(((split == value) & removed).sum()),
             }
 
     return {"classes": list(classes), "hard_negative_index": hn_index, "counts": counts}
@@ -300,7 +307,10 @@ class H5SnippetDataset(Dataset):
         with h5py.File(h5_path, "r") as f:
             self.classes = list(f["classes"].asstr()[:])
             all_split = f["split"][:]
-            self.indices = np.flatnonzero(all_split == split)  # h5 row per sample
+            keep = all_split == split
+            if "removed" in f:  # curated-out snippets leave every split
+                keep &= ~f["removed"][:].astype(bool)
+            self.indices = np.flatnonzero(keep)  # h5 row per sample
             self.labels = f["labels"][:][self.indices].astype(np.int64)
             self.gt = f["gt"][:][self.indices].astype(bool)
 

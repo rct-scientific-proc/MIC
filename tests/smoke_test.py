@@ -280,6 +280,18 @@ def main() -> None:
         "gridmask:p=1.0", "coldrop:p=1.0,frac=0.2", "--seed", "1", "--no-progress", *GPU_TRAIN)
     assert (OUT_ROOT / "run_plugin" / "metrics.csv").exists()
 
+    # curate: snippet-removal GUI - self-test does a remove/save/restore
+    # round-trip on a copy (removed mask honored by loaders, file left clean)
+    h5_cur = OUT_ROOT / "curate_smoke.h5"
+    shutil.copyfile(h5, h5_cur)
+    if importlib.util.find_spec("PyQt5") is not None:
+        run(REPO / "curate.py", h5_cur, "--self-test", OUT_ROOT / "gui_curate")
+        assert (OUT_ROOT / "gui_curate" / "removed_view.png").exists()
+    else:
+        r = subprocess.run([sys.executable, str(REPO / "curate.py"), str(h5_cur)],
+                           capture_output=True, text=True, cwd=REPO)
+        assert "pip install PyQt5" in r.stdout + r.stderr
+
     # gui: optional PyQt5 front-end - the self-test renders offscreen and
     # asserts the commands each tab builds (without PyQt5, the entry point
     # must print the install hint instead of a traceback)

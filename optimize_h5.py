@@ -53,6 +53,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "offset reads; gzip/lzf trade read speed for disk "
                         "(written with per-image chunks)")
     p.add_argument("--gzip-level", type=int, default=4, choices=range(0, 10))
+    p.add_argument("--drop-removed", action="store_true",
+                   help="permanently purge snippets flagged by curate.py "
+                        "(the 'removed' dataset) instead of copying them; "
+                        "the output then carries no 'removed' dataset")
     p.add_argument("--batch-size", type=int, default=1024,
                    help="images processed per read/resize/write step")
     p.add_argument("--device", default=None, help="cuda / cpu (default: auto)")
@@ -81,6 +85,12 @@ def main(argv=None) -> None:
 
     with h5py.File(args.input, "r") as fin:
         n, h, w, c = fin["images"].shape
+        keep = np.ones(n, dtype=bool)
+        if args.drop_removed and "removed" in fin:
+            keep = ~fin["removed"][:].astype(bool)
+            print(f"dropping {int((~keep).sum())} removed snippet(s); "
+                  f"{int(keep.sum())} remain")
+        n_out = int(keep.sum())
         th = tw = args.resize or 0
         resizing = bool(args.resize) and (th, tw) != (h, w)
         oh, ow = (th, tw) if resizing else (h, w)
@@ -113,21 +123,30 @@ def main(argv=None) -> None:
         out = Path(args.output)
         out.parent.mkdir(parents=True, exist_ok=True)
         with h5py.File(out, "w") as fout:
-            dset = fout.create_dataset("images", shape=(n, oh, ow, c),
+            dset = fout.create_dataset("images", shape=(n_out, oh, ow, c),
                                        dtype=np.uint8, **comp)
             for name in ("labels", "gt", "split"):
-                fout[name] = fin[name][:]
+                fout[name] = fin[name][:][keep]
+            if "removed" in fin and not args.drop_removed:
+                fout["removed"] = fin["removed"][:]  # curation carries over
             fout["classes"] = np.array(fin["classes"].asstr()[:], dtype=object)
 
             steps = range(0, n, args.batch_size)
+            out_pos = 0
             for start in tqdm(steps, desc="optimize", unit="batch",
                               disable=args.no_progress):
                 block = fin["images"][start:start + args.batch_size]
+                kmask = keep[start:start + args.batch_size]
+                if not kmask.all():
+                    block = block[kmask]
+                if not len(block):
+                    continue
                 if resizer is not None:
                     t = torch.from_numpy(block).permute(0, 3, 1, 2).to(device)
                     t = resizer(t)
                     block = t.permute(0, 2, 3, 1).cpu().numpy()
-                dset[start:start + len(block)] = block
+                dset[out_pos:out_pos + len(block)] = block
+                out_pos += len(block)
 
     validate_h5(str(out))
     old_mb = Path(args.input).stat().st_size / 1e6
