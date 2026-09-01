@@ -1496,8 +1496,11 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
   (double-click for a large preview), and <strong>remove bad ones from
   training entirely</strong>. The left panel selects the split and a class
   (with live counts, including how many of each class are removed); the
-  grid pages through thumbnails 200 at a time with multi-select, and
-  <kbd>Del</kbd> or the Remove button flags the selection. Like the run
+  grid pages through thumbnails 200 at a time with full multi-select —
+  Ctrl/Shift-click, a dragged rubber band, <kbd>Ctrl+A</kbd> or the
+  "Select page" button, with a live "N selected" counter — and
+  <kbd>Del</kbd> or the Remove/Restore buttons act on the whole
+  selection at once. Like the run
   GUI, PyQt5 is optional: without it the entry point prints
   <code>pip install PyQt5</code>.</p>
   <p><strong>How removal is stored.</strong> Save never rewrites the

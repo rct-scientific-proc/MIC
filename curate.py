@@ -98,13 +98,21 @@ if QtWidgets is not None:
             self.grid.setGridSize(QtCore.QSize(THUMB + 22, THUMB + 40))
             self.grid.setSelectionMode(
                 QtWidgets.QAbstractItemView.ExtendedSelection)
+            self.grid.setSelectionRectVisible(True)  # drag a rubber band
             self.grid.itemDoubleClicked.connect(self._preview)
+            self.grid.itemSelectionChanged.connect(self._selection_changed)
 
             self.page_label = QtWidgets.QLabel("")
+            self.sel_label = QtWidgets.QLabel("")
             prev_btn = QtWidgets.QPushButton("< Prev")
             next_btn = QtWidgets.QPushButton("Next >")
             prev_btn.clicked.connect(lambda: self._page_step(-1))
             next_btn.clicked.connect(lambda: self._page_step(+1))
+            select_page_btn = QtWidgets.QPushButton("Select page")
+            select_page_btn.setToolTip(
+                "select every snippet on this page (Ctrl+A); Ctrl/Shift-click "
+                "or drag a rubber band for partial selections")
+            select_page_btn.clicked.connect(self.grid.selectAll)
             self.remove_btn = QtWidgets.QPushButton("Remove selected (Del)")
             self.restore_btn = QtWidgets.QPushButton("Restore selected (Del)")
             self.save_btn = QtWidgets.QPushButton("Save")
@@ -118,6 +126,8 @@ if QtWidgets is not None:
             bar.addWidget(prev_btn)
             bar.addWidget(self.page_label)
             bar.addWidget(next_btn)
+            bar.addWidget(select_page_btn)
+            bar.addWidget(self.sel_label)
             bar.addStretch(1)
             bar.addWidget(self.remove_btn)
             bar.addWidget(self.restore_btn)
@@ -200,6 +210,14 @@ if QtWidgets is not None:
             hi = lo + len(chunk)
             self.page_label.setText(
                 f"{lo + 1}-{hi} of {len(rows)}" if len(rows) else "empty")
+
+        def _selection_changed(self):
+            k = len(self.grid.selectedItems())
+            self.sel_label.setText(f"{k} selected" if k else "")
+            verb = "Restore" if self.in_removed_view() else "Remove"
+            btn = self.restore_btn if self.in_removed_view() else self.remove_btn
+            btn.setText(f"{verb} {k} selected (Del)" if k
+                        else f"{verb} selected (Del)")
 
         # ---- actions ------------------------------------------------
         def _selected_rows(self) -> list[int]:
@@ -307,7 +325,10 @@ def _self_test(win, out_dir: Path) -> None:
     win.save()
     with h5py.File(win.h5_path, "r") as f:
         assert f["removed"][:].sum() == 1
-    win.grid.selectAll()
+    win.grid.selectAll()  # "Select page" button routes here too
+    app.processEvents()
+    assert win.sel_label.text() == "1 selected", win.sel_label.text()
+    assert "Restore 1 selected" in win.restore_btn.text()
     win.restore_selected()
     win.save()
     assert len(H5SnippetDataset(win.h5_path, SPLIT_TRAIN)) == base_train_len
