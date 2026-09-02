@@ -57,6 +57,15 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="permanently purge snippets flagged by curate.py "
                         "(the 'removed' dataset) instead of copying them; "
                         "the output then carries no 'removed' dataset")
+    p.add_argument("--sort-split", action="store_true",
+                   help="group output rows by split (train | validate | "
+                        "test) so each split is one contiguous region - "
+                        "large, larger-than-RAM files then read much faster "
+                        "(the every-epoch validation pass streams "
+                        "sequentially). NOTE: this renames every row index, "
+                        "so a resumed run's miner state and curate.py's "
+                        "removed references no longer line up with the "
+                        "output; sort before training, not after")
     p.add_argument("--batch-size", type=int, default=1024,
                    help="images processed per read/resize/write step")
     p.add_argument("--device", default=None, help="cuda / cpu (default: auto)")
@@ -90,7 +99,22 @@ def main(argv=None) -> None:
             keep = ~fin["removed"][:].astype(bool)
             print(f"dropping {int((~keep).sum())} removed snippet(s); "
                   f"{int(keep.sum())} remain")
-        n_out = int(keep.sum())
+        # Output row order: kept rows, optionally grouped by split. A
+        # stable sort keeps each split's internal order (so a split that
+        # was already contiguous is unchanged), and the identity order is
+        # a plain ascending range so the no-sort path still slices
+        # sequentially.
+        kept = np.flatnonzero(keep)
+        if args.sort_split:
+            split_all = fin["split"][:]
+            order = kept[np.argsort(split_all[kept], kind="stable")]
+            print("grouping rows by split: "
+                  + ", ".join(f"{name} {int((split_all[kept] == v).sum())}"
+                              for v, name in ((0, "train"), (1, "validate"),
+                                              (2, "test"))))
+        else:
+            order = kept
+        n_out = len(order)
         th = tw = args.resize or 0
         resizing = bool(args.resize) and (th, tw) != (h, w)
         oh, ow = (th, tw) if resizing else (h, w)
@@ -127,21 +151,22 @@ def main(argv=None) -> None:
             dset = fout.create_dataset("images", shape=(n_out, oh, ow, c),
                                        dtype=fin["images"].dtype, **comp)
             for name in ("labels", "gt", "split"):
-                fout[name] = fin[name][:][keep]
+                fout[name] = fin[name][:][order]
             if "removed" in fin and not args.drop_removed:
-                fout["removed"] = fin["removed"][:]  # curation carries over
+                # keep is all-True when not dropping, so order covers every
+                # row; the mask follows the same permutation as the images
+                fout["removed"] = fin["removed"][:][order]
             fout["classes"] = np.array(fin["classes"].asstr()[:], dtype=object)
 
-            steps = range(0, n, args.batch_size)
-            out_pos = 0
-            for start in tqdm(steps, desc="optimize", unit="batch",
-                              disable=args.no_progress):
-                block = fin["images"][start:start + args.batch_size]
-                kmask = keep[start:start + args.batch_size]
-                if not kmask.all():
-                    block = block[kmask]
-                if not len(block):
-                    continue
+            steps = range(0, n_out, args.batch_size)
+            for out_start in tqdm(steps, desc="optimize", unit="batch",
+                                  disable=args.no_progress):
+                src = order[out_start:out_start + args.batch_size]
+                # h5py point-selects in increasing order; read ascending
+                # then restore the batch's output order
+                perm = np.argsort(src, kind="stable")
+                block = fin["images"][src[perm]]
+                block = block[np.argsort(perm, kind="stable")]
                 if resizer is not None:
                     src_dtype = block.dtype
                     work = (block if src_dtype == np.uint8
@@ -153,8 +178,7 @@ def main(argv=None) -> None:
                         block = block.round().clip(0, 65535).astype(np.uint16)
                     elif block.dtype != src_dtype:
                         block = block.astype(src_dtype)
-                dset[out_pos:out_pos + len(block)] = block
-                out_pos += len(block)
+                dset[out_start:out_start + len(block)] = block
 
     validate_h5(str(out))
     old_mb = Path(args.input).stat().st_size / 1e6

@@ -311,6 +311,18 @@ def main() -> None:
         assert f["images"].dtype == np.float32, f["images"].dtype
         assert np.array_equal(f["images"][:8], s["images"][:8]), \
             "optimize changed float pixel values"
+    # --sort-split groups rows by split and permutes every aligned dataset
+    # (and the images) together, without changing content
+    run(REPO / "optimize_h5.py", h5_f32, OUT_ROOT / "smoke_f32_sorted.h5",
+        "--sort-split", "--no-progress")
+    with h5py.File(OUT_ROOT / "smoke_f32_sorted.h5", "r") as f, \
+            h5py.File(h5_f32, "r") as s:
+        sp = f["split"][:]
+        assert list(sp) == sorted(sp), "rows not grouped by split"
+        order = np.argsort(s["split"][:], kind="stable")
+        assert np.array_equal(f["labels"][:], s["labels"][:][order])
+        assert np.array_equal(f["images"][:16], s["images"][:][order][:16]), \
+            "sort-split misaligned images vs labels"
 
     # curate: snippet-removal GUI - self-test does a remove/save/restore
     # round-trip on a copy (removed mask honored by loaders, file left clean)

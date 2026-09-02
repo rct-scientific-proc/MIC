@@ -1673,7 +1673,8 @@ float32   0.0 – 1.0    already-scaled floats — 4x the disk/IO of uint8</div>
 
   <h3>optimize_h5.py — rewrite any h5 for fast loading</h3>
   <p class="syn"><code>python optimize_h5.py in.h5 out.h5 [--resize 224]
-  [--compression none|gzip|lzf]</code> — rewrites any h5 in the project layout
+  [--sort-split] [--drop-removed] [--compression none|gzip|lzf]</code> —
+  rewrites any h5 in the project layout
   (whatever wrote it) with a <strong>contiguous, uncompressed</strong> images
   dataset (the default): every per-sample read becomes a direct offset into
   the file — no chunk lookup, no decompression — and the OS page cache serves
@@ -1690,6 +1691,25 @@ float32   0.0 – 1.0    already-scaled floats — 4x the disk/IO of uint8</div>
   (32px to 224px is 49x); the script warns before doing it — for small
   sources keep the native size and let training resize
   (<code>--workers</code> parallelizes it).</p>
+  <p><code>--sort-split</code> groups the output rows by split
+  (train | validate | test) so each split is one contiguous region.
+  Random per-sample training reads never become sequential — the sampler
+  reshuffles every epoch — but confining them to the compacted train
+  region, and streaming the every-epoch validation pass sequentially,
+  speeds up <strong>larger-than-RAM</strong> files sharply. Measured on a
+  ~20&nbsp;GB file (which does not fit in page cache): the cold validation
+  pass went <strong>~22x</strong> (15&nbsp;s → 0.7&nbsp;s) and shuffled
+  training reads <strong>~2.2x</strong>; on a file that fits in RAM the
+  gain is small after the first epoch, since the cache erases layout.
+  A stable sort preserves each split's internal order. <strong>Caveat:</strong>
+  reordering renames every row index, so a checkpoint's miner state and
+  <code>curate.py</code>'s <code>removed</code> references no longer align
+  with the output — sort <em>before</em> training a run, not partway
+  through one. <code>--drop-removed</code> permanently purges the snippets
+  <code>curate.py</code> flagged (the <code>removed</code> dataset) instead
+  of carrying them over, filtering all aligned datasets together and
+  writing no <code>removed</code> dataset; it composes with
+  <code>--sort-split</code> and <code>--resize</code>.</p>
 </section>
 
 <section class="tool" id="outputs">
