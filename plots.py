@@ -18,6 +18,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from dataset import to_display_uint8
+
 # Fixed categorical order (validated reference palette, light mode).
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
           "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
@@ -306,7 +308,8 @@ def grid_ncols(captions, ncols: int = 5) -> int:
 
 def plot_sample_grid(images: list[np.ndarray], captions: list[str], title: str,
                      path, ncols: int = 4) -> None:
-    """Grid of raw dataset thumbnails (uint8 HWC) with per-sample captions —
+    """Grid of raw dataset thumbnails (HWC, any h5 image dtype) with
+    per-sample captions —
     used by the report to show the actual problem samples. Columns drop (and
     cells widen) when the captions need the room, so entire filenames stay
     readable."""
@@ -324,6 +327,7 @@ def plot_sample_grid(images: list[np.ndarray], captions: list[str], title: str,
     for ax in axes.flat:
         ax.set_axis_off()
     for ax, img, cap in zip(axes.flat, images, captions):
+        img = to_display_uint8(img)  # uint16/float files display correctly
         ax.imshow(img.squeeze() if img.shape[-1] == 1 else img,
                   cmap="gray" if img.shape[-1] == 1 else None,
                   vmin=0, vmax=255)

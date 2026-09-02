@@ -26,7 +26,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from dataset import SPLIT_NAMES, validate_h5
+from dataset import SPLIT_NAMES, to_display_uint8, validate_h5
 
 REPO = Path(__file__).resolve().parent
 INSTALL_HINT = "the curator needs PyQt5 - to run it: pip install PyQt5"
@@ -42,8 +42,8 @@ except ImportError:  # main() prints the hint; the module stays importable
 if QtWidgets is not None:
 
     def _pixmap(arr: np.ndarray, side: int) -> QtGui.QPixmap:
-        """HWC uint8 (C = 1 or 3) -> square-scaled QPixmap."""
-        arr = np.ascontiguousarray(arr)
+        """HWC crop in any h5 image dtype (C = 1 or 3) -> QPixmap."""
+        arr = np.ascontiguousarray(to_display_uint8(arr))
         h, w, c = arr.shape
         fmt = (QtGui.QImage.Format_Grayscale8 if c == 1
                else QtGui.QImage.Format_RGB888)

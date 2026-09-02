@@ -18,9 +18,12 @@ The contract (identical to the built-in catalog in dataset.py):
       tensor to an image tensor - a torchvision v2 transform, a
       torch.nn.Module of your own, or v2.Lambda. Input depends on the
       stage:
-        * pre-resize (the default): the raw CHW uint8 crop at source
-          resolution - 3 channels, or 1 for a grayscale dataset; return
-          the same dtype and layout.
+        * pre-resize (the default): the raw CHW crop at source
+          resolution in its storage scale - uint8 0-255 for uint8 files,
+          float32 in [0, 1] for uint16/float16/float32 files (uint16 is
+          divided by 65535 on read) - 3 channels, or 1 for a grayscale
+          dataset; return the same dtype and layout. Handle both scales
+          (see GaussianNoise below) unless your files are always uint8.
         * post-resize (names listed in POST_RESIZE): the model-scale
           float tensor - 224x224, scaled to [0,1] and ImageNet-normalized
           when --imagenet-norm is on. Use this stage when the effect
@@ -66,16 +69,21 @@ class ColumnDropout(torch.nn.Module):
 
 
 class GaussianNoise(torch.nn.Module):
-    """Additive gaussian pixel noise on the raw uint8 crop (pre-resize):
-    computed in float, clamped, and returned as uint8 again."""
+    """Additive gaussian pixel noise on the raw crop (pre-resize). `sigma`
+    is in 8-bit units (0-255) whatever the storage dtype: float [0,1]
+    crops (float16/float32/uint16 files) scale it by 1/255 so the visual
+    strength matches across files."""
 
     def __init__(self, sigma: float):
         super().__init__()
         self.sigma = float(sigma)
 
     def forward(self, img):
-        noise = torch.randn_like(img, dtype=torch.float32) * self.sigma
-        return (img.float() + noise).clamp(0, 255).to(img.dtype)
+        if img.dtype == torch.uint8:
+            noise = torch.randn_like(img, dtype=torch.float32) * self.sigma
+            return (img.float() + noise).clamp(0, 255).to(img.dtype)
+        noise = torch.randn_like(img) * (self.sigma / 255.0)
+        return (img + noise).clamp(0.0, 1.0)
 
 
 AUGMENTATIONS = {

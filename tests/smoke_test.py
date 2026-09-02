@@ -280,10 +280,42 @@ def main() -> None:
         "gridmask:p=1.0", "coldrop:p=1.0,frac=0.2", "--seed", "1", "--no-progress", *GPU_TRAIN)
     assert (OUT_ROOT / "run_plugin" / "metrics.csv").exists()
 
+    # non-uint8 storage: uint16 grayscale trains end to end; a float32
+    # [0,1] file trains and survives an optimize round trip byte-true
+    h5_u16 = OUT_ROOT / "smoke_u16.h5"
+    make_dataset(str(h5_u16), num_genuine_classes=3, genuine_per_class=20,
+                 hn_factor=10.0, seed=3, channels=1, image_hw=(64, 64),
+                 dtype="uint16")
+    run(REPO / "train.py", h5_u16, "--arch", "resnet18", "--no-pretrained",
+        "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
+        "--out-dir", OUT_ROOT / "run_u16", "--no-report", "--patience", "0",
+        "--seed", "1", "--no-progress", *GPU_TRAIN)
+    assert (OUT_ROOT / "run_u16" / "metrics.csv").exists()
+
+    import h5py
+    import numpy as np
+    h5_f32 = OUT_ROOT / "smoke_f32.h5"
+    with h5py.File(h5, "r") as a, h5py.File(h5_f32, "w") as b:
+        b["images"] = a["images"][:].astype(np.float32) / 255.0
+        for k in ("labels", "gt", "split"):
+            b[k] = a[k][:]
+        b["classes"] = np.array(a["classes"].asstr()[:], dtype=object)
+    run(REPO / "train.py", h5_f32, "--arch", "resnet18", "--no-pretrained",
+        "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
+        "--out-dir", OUT_ROOT / "run_f32", "--no-report", "--patience", "0",
+        "--seed", "1", "--no-progress", *GPU_TRAIN)
+    run(REPO / "optimize_h5.py", h5_f32, OUT_ROOT / "smoke_f32_opt.h5",
+        "--no-progress")
+    with h5py.File(OUT_ROOT / "smoke_f32_opt.h5", "r") as f, \
+            h5py.File(h5_f32, "r") as s:
+        assert f["images"].dtype == np.float32, f["images"].dtype
+        assert np.array_equal(f["images"][:8], s["images"][:8]), \
+            "optimize changed float pixel values"
+
     # curate: snippet-removal GUI - self-test does a remove/save/restore
     # round-trip on a copy (removed mask honored by loaders, file left clean)
     h5_cur = OUT_ROOT / "curate_smoke.h5"
-    shutil.copyfile(h5, h5_cur)
+    shutil.copyfile(h5_f32, h5_cur)
     if importlib.util.find_spec("PyQt5") is not None:
         run(REPO / "curate.py", h5_cur, "--self-test", OUT_ROOT / "gui_curate")
         assert (OUT_ROOT / "gui_curate" / "removed_view.png").exists()

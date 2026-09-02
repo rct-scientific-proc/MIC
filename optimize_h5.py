@@ -95,8 +95,9 @@ def main(argv=None) -> None:
         resizing = bool(args.resize) and (th, tw) != (h, w)
         oh, ow = (th, tw) if resizing else (h, w)
 
-        old_logical = n * h * w * c
-        new_logical = n * oh * ow * c
+        bpp = fin["images"].dtype.itemsize
+        old_logical = n * h * w * c * bpp
+        new_logical = n * oh * ow * c * bpp
         if new_logical > old_logical:
             print(f"WARNING: resizing {h}x{w} -> {oh}x{ow} INFLATES the data "
                   f"{new_logical / old_logical:.1f}x "
@@ -124,7 +125,7 @@ def main(argv=None) -> None:
         out.parent.mkdir(parents=True, exist_ok=True)
         with h5py.File(out, "w") as fout:
             dset = fout.create_dataset("images", shape=(n_out, oh, ow, c),
-                                       dtype=np.uint8, **comp)
+                                       dtype=fin["images"].dtype, **comp)
             for name in ("labels", "gt", "split"):
                 fout[name] = fin[name][:][keep]
             if "removed" in fin and not args.drop_removed:
@@ -142,9 +143,16 @@ def main(argv=None) -> None:
                 if not len(block):
                     continue
                 if resizer is not None:
-                    t = torch.from_numpy(block).permute(0, 3, 1, 2).to(device)
+                    src_dtype = block.dtype
+                    work = (block if src_dtype == np.uint8
+                            else block.astype(np.float32))
+                    t = torch.from_numpy(work).permute(0, 3, 1, 2).to(device)
                     t = resizer(t)
                     block = t.permute(0, 2, 3, 1).cpu().numpy()
+                    if src_dtype == np.uint16:
+                        block = block.round().clip(0, 65535).astype(np.uint16)
+                    elif block.dtype != src_dtype:
+                        block = block.astype(src_dtype)
                 dset[out_pos:out_pos + len(block)] = block
                 out_pos += len(block)
 

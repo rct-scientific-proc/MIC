@@ -23,6 +23,7 @@ def make_dataset(
     image_hw: tuple[int, int] = (28, 28),
     channels: int = 1,
     seed: int = 0,
+    dtype: str = "uint8",
 ) -> None:
     rng = np.random.default_rng(seed)
     class_names = [f"band{i}" for i in range(num_genuine_classes)] + ["hard_negative"]
@@ -58,6 +59,12 @@ def make_dataset(
     h, w = image_hw
     noise = rng.integers(-20, 21, (len(labels), h, w, channels))
     images = (brightness[:, None, None, None] + noise).clip(0, 255).astype(np.uint8)
+    if dtype == "uint16":
+        images = images.astype(np.uint16) * 257  # 0-255 -> 0-65535
+    elif dtype in ("float16", "float32"):
+        images = (images.astype(np.float32) / 255.0).astype(dtype)
+    elif dtype != "uint8":
+        raise ValueError(f"unsupported dtype '{dtype}'")
 
     with h5py.File(path, "w") as f:
         f["images"] = images

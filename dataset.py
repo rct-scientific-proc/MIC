@@ -29,6 +29,33 @@ SPLIT_NAMES = {SPLIT_TRAIN: "train", SPLIT_VAL: "validate", SPLIT_TEST: "test"}
 
 HARD_NEGATIVE_NAME = "hard_negative"
 
+# Allowed image dtypes and their expected pixel ranges (h5_format.md):
+#   uint8 0-255 · uint16 0-65535 · float16/float32 already scaled to [0, 1]
+IMAGE_DTYPES = {"uint8", "uint16", "float16", "float32"}
+
+
+def to_model_input(arr: np.ndarray) -> np.ndarray:
+    """Storage dtype -> what the transform pipeline consumes. uint8 stays
+    uint8 (ToDtype scales it by 255 later; augmentations see the classic
+    0-255 crop); every other allowed dtype becomes float32 in [0, 1]
+    (uint16 divided by 65535, float16 widened, float32 as-is)."""
+    if arr.dtype == np.uint8:
+        return arr
+    if arr.dtype == np.uint16:
+        return arr.astype(np.float32) / 65535.0
+    return arr.astype(np.float32, copy=False)
+
+
+def to_display_uint8(arr: np.ndarray) -> np.ndarray:
+    """Storage dtype -> uint8 for thumbnails and previews (curate GUI,
+    report sample grids), regardless of how the file stores pixels."""
+    arr = np.asarray(arr)
+    if arr.dtype == np.uint8:
+        return arr
+    if arr.dtype == np.uint16:
+        return (arr // 257).astype(np.uint8)
+    return (np.clip(arr.astype(np.float32), 0.0, 1.0) * 255.0).astype(np.uint8)
+
 
 # Training-only augmentation catalog (opt-in via --augment). Never applied
 # to validation, evaluation, or inference. Every entry is parameterizable:
@@ -45,6 +72,22 @@ def _maybe(p, transform):
     return transform if p >= 1 else v2.RandomApply([transform], p=p)
 
 
+class _Solarize(torch.nn.Module):
+    """Solarize with a dtype-aware default threshold: 128 for uint8 crops,
+    0.5 for float crops ([0,1] storage). An explicit threshold is used
+    as-is - pass it in the crop's own scale."""
+
+    def __init__(self, threshold):
+        super().__init__()
+        self.threshold = threshold
+
+    def forward(self, img):
+        thr = self.threshold
+        if thr is None:
+            thr = 128 if img.dtype == torch.uint8 else 0.5
+        return v2.functional.solarize(img, thr)
+
+
 AUGMENTATIONS = {
     "grayscale": lambda p=0.2: v2.RandomGrayscale(p=p),
     "colorjitter": lambda p=0.5, brightness=0.2, contrast=0.2,
@@ -58,8 +101,8 @@ AUGMENTATIONS = {
         _maybe(p, v2.RandomRotation(degrees)),
     "invert": lambda p=0.3: v2.RandomInvert(p=p),
     "posterize": lambda p=0.3, bits=4: v2.RandomPosterize(int(bits), p=p),
-    "solarize": lambda p=0.3, threshold=128:
-        v2.RandomSolarize(threshold, p=p),
+    "solarize": lambda p=0.3, threshold=None:
+        _maybe(p, _Solarize(threshold)),
     "sharpness": lambda p=0.3, factor=2.0:
         v2.RandomAdjustSharpness(factor, p=p),
     "autocontrast": lambda p=0.3: v2.RandomAutocontrast(p=p),
@@ -243,6 +286,20 @@ def validate_h5(path: str) -> dict:
                 f"got shape {f['images'].shape}"
             )
 
+        dt = f["images"].dtype
+        if dt.name not in IMAGE_DTYPES:
+            raise ValueError(
+                f"{path}: images dtype {dt} unsupported; allowed: "
+                + ", ".join(sorted(IMAGE_DTYPES))
+                + " (uint8 0-255, uint16 0-65535, float16/float32 in [0, 1])")
+        if dt.kind == "f" and n:
+            sample = f["images"][:: max(1, n // 64)]
+            lo, hi = float(sample.min()), float(sample.max())
+            if lo < -0.01 or hi > 1.01:
+                raise ValueError(
+                    f"{path}: float images must be scaled to [0, 1]; a "
+                    f"sample spans [{lo:.4g}, {hi:.4g}]")
+
         classes = f["classes"].asstr()[:]
         if classes[-1] != HARD_NEGATIVE_NAME:
             raise ValueError(
@@ -280,7 +337,8 @@ def validate_h5(path: str) -> dict:
                 "removed": int(((split == value) & removed).sum()),
             }
 
-    return {"classes": list(classes), "hard_negative_index": hn_index, "counts": counts}
+    return {"classes": list(classes), "hard_negative_index": hn_index,
+            "counts": counts, "dtype": dt.name}
 
 
 class H5SnippetDataset(Dataset):
@@ -342,11 +400,12 @@ class H5SnippetDataset(Dataset):
     def __getitem__(self, i: int):
         if self._file is None:
             self._file = h5py.File(self.h5_path, "r")
-        img = self._file["images"][self.indices[i]]  # (H, W, C) uint8
+        img = self._file["images"][self.indices[i]]  # (H, W, C) storage dtype
+        img = to_model_input(img)  # uint8 stays; uint16/float16 -> f32 [0,1]
         img = torch.from_numpy(np.ascontiguousarray(img)).permute(2, 0, 1)  # CHW
         if img.shape[0] == 1:
             img = img.expand(3, -1, -1)
-        if self.augment_pre is not None:  # training split only; uint8 here
+        if self.augment_pre is not None:  # train split; storage-scale crop
             img = self.augment_pre(img.contiguous())
         img = self.transform(img)
         if self.augment_post is not None:  # e.g. erasing, at model scale
