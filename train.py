@@ -600,10 +600,10 @@ def ramp_values(args, ramp_progress: int, n_genuine: int, n_hn: int) -> tuple[fl
 
 def validate(model, loader, device, hn_index, target_recall, recall_agg,
              min_threshold: float = 0.0, threshold_mode: str = "global",
-             per_class_min_count: int = 20,
+             per_class_min_count: int = 20, amp: bool = False,
              desc: str = "validate", progress: bool = True) -> dict:
     probs, labels = collect_probs(model, loader, device, desc=desc,
-                                  progress=progress)
+                                  progress=progress, amp=amp)
     if threshold_mode == "per-class":
         op = sweep_class_thresholds(probs, labels, hn_index, target_recall,
                                     agg=recall_agg, min_threshold=min_threshold,
@@ -712,7 +712,12 @@ def train(args, on_epoch_end=None) -> dict:
         train_ds.labels, hn_index, ratio=ratio0, miner=miner,
         random_frac=args.mining_random_frac, seed=args.seed,
     )
-    loader_kw = dict(num_workers=args.workers, pin_memory=device.type == "cuda")
+    # persistent workers: without them every epoch re-spawns the worker
+    # processes (a torch re-import each, ~3 s per loader per epoch on
+    # Windows). The sampler lives in the main process, so its per-epoch
+    # state changes still reach persistent workers.
+    loader_kw = dict(num_workers=args.workers, pin_memory=device.type == "cuda",
+                     persistent_workers=args.workers > 0)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler,
                               **loader_kw)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, **loader_kw)
@@ -843,7 +848,7 @@ def train(args, on_epoch_end=None) -> dict:
         op = validate(model, val_loader, device, hn_index, args.target_recall,
                       args.recall_agg, min_threshold=args.min_threshold,
                       threshold_mode=args.threshold_mode,
-                      per_class_min_count=args.per_class_min_count,
+                      per_class_min_count=args.per_class_min_count, amp=amp,
                       desc=f"epoch {epoch} validate", progress=progress)
         dt = time.time() - t0
 

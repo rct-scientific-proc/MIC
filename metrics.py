@@ -47,17 +47,23 @@ from tqdm import tqdm
 
 @torch.no_grad()
 def collect_probs(model, loader, device, desc: str | None = None,
-                  progress: bool = True) -> tuple[np.ndarray, np.ndarray]:
+                  progress: bool = True, amp: bool = False
+                  ) -> tuple[np.ndarray, np.ndarray]:
     """Run the model over a loader; return (probs (N, K) float32, labels (N,)).
 
+    `amp` runs the forward under autocast (CUDA only) - the probabilities
+    are still computed from fp32 logits. Training passes its own AMP
+    setting so validation scores match the precision the run trains at.
     Shows a transient batch progress bar when `progress` (labelled `desc`);
     the bar clears on completion so summary lines stay the persistent log.
     """
     model.eval()
     probs, labels = [], []
     bar = tqdm(loader, desc=desc, unit="batch", leave=False, disable=not progress)
+    use_amp = bool(amp) and device.type == "cuda"
     for imgs, labs, _ in bar:
-        logits = model(imgs.to(device, non_blocking=True))
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+            logits = model(imgs.to(device, non_blocking=True))
         probs.append(torch.softmax(logits.float(), dim=1).cpu())
         labels.append(labs)
     return torch.cat(probs).numpy(), torch.cat(labels).numpy()

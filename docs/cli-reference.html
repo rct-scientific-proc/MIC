@@ -452,11 +452,14 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     <div class="arg-head"><span class="flag">--workers</span><span class="badge">int</span><span class="badge">default: 0</span></div>
     <p>DataLoader worker processes. The dataset opens its h5 handle lazily inside
     each worker (never pickling an open handle), so multiprocess loading is safe
-    on Windows' spawn start method. Economics: each worker re-spawns per epoch on
-    Windows, costing a few seconds — for small datasets <code>0</code> is genuinely
-    faster; for datasets where decode/resize dominates, 2–8 workers keep the GPU
-    fed. Rule of thumb: raise it only when GPU utilization is low and epoch time
-    is dominated by loading.</p>
+    on Windows' spawn start method. Workers are <strong>persistent</strong>:
+    they spawn once per run rather than once per epoch (on Windows' spawn
+    start method a respawn re-imports torch — measured ~3 s per loader per
+    epoch, paid by both the train and validation loaders before this change).
+    The first epoch still pays the spawn; every later epoch is loading-only.
+    Rule of thumb: raise it when GPU utilization is low and epoch time is
+    dominated by loading; 2–8 keeps a GPU fed when decode/resize/augmentation
+    dominates.</p>
   </div>
 
   <div class="arg" id="t-amp">
@@ -464,9 +467,12 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     <p>Mixed-precision training (CUDA only): forward/loss under autocast in
     fp16/bf16 with a gradient scaler guarding against underflow. Typically
     1.5–2× faster and ~40% less memory on resnet50-class models with no accuracy
-    cost. Validation always computes probabilities in fp32 after the logits, so
-    threshold sweeps are unaffected. The scaler state is checkpointed and
-    restored on resume.</p>
+    cost. The per-epoch <strong>validation pass runs under the same
+    precision</strong> (measured 1.7× faster forward than fp32), with
+    probabilities always computed in fp32 after the logits — and since
+    <code>inference.py</code> runs under AMP by default, thresholds swept
+    under AMP match the scores inference actually produces. The scaler state
+    is checkpointed and restored on resume.</p>
   </div>
 
   <div class="arg" id="t-patience">
