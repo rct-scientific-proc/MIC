@@ -1897,6 +1897,72 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
   <p class="syn">Starts balanced with hard negatives nearly ignored; each epoch that
   holds 0.95 recall steps alpha and volume up one notch of ten.</p>
 
+  <h3>Very difficult, highly imbalanced dataset (the full toolkit)</h3>
+  <pre><code>python train.py data.h5 --arch resnet34 --amp --workers 4 ^
+    --smart 4 --recall-first 4 ^
+    --target-recall 0.95 --recall-agg harmonic ^
+    --threshold-mode per-class --per-class-min-count 30 --min-threshold 0.2 ^
+    --class-alpha-auto --ema ^
+    --imbalance-ratio 4.0 --hn-alpha-end 1.0 ^
+    --augment rotation:p=0.7,degrees=20 gaussianblur erasing:p=0.3,scale=0.02-0.1 ^
+    --out-dir runs/hard1</code></pre>
+  <p class="syn">Every lever the pipeline has for the case where rare genuine
+  classes are drowning in hard negatives, in one run. What each line buys:</p>
+  <ul>
+    <li><code>--smart 4 --recall-first 4</code>: a long, patient run (150
+    epochs, 15-epoch cycles, small pressure steps, rescue on) that opens with
+    hard negatives almost switched off (<code>hn-alpha</code> 0.02, ratio
+    1.0) and only <em>earns</em> hard-negative pressure at cycle troughs where
+    the recall target holds — rewinding to the last stable milestone when a
+    pressure step breaks recall. Rescue boosts any class whose smoothed recall
+    lags the target.</li>
+    <li><code>--recall-agg harmonic</code>: the target is dominated by the
+    worst class, so one collapsed rare class cannot hide behind four perfect
+    ones.</li>
+    <li><code>--threshold-mode per-class --per-class-min-count 30
+    --min-threshold 0.2</code>: easy classes keep strict thresholds while the
+    hard class gets the slack it needs; small partitions fall back to the
+    global threshold, and the floor stops an unreachable target from
+    dragging the operating point to "accept everything".</li>
+    <li><code>--class-alpha-auto</code>: effective-number alphas from the
+    training counts, so the rarest classes carry proportionally more loss
+    from epoch 0 rather than waiting for rescue to notice mid-run.</li>
+    <li><code>--ema</code>: validate, sweep, and deploy the averaged weights
+    — rare classes' few, noisy gradient steps are exactly what averaging
+    smooths, and the operating point stops jittering between epochs.</li>
+    <li><code>--imbalance-ratio 4.0 --hn-alpha-end 1.0</code>: the pressure
+    <em>endpoints</em> — at full pressure each epoch sees 4 mined hard
+    negatives per genuine sample at full loss weight; the miner fills that
+    budget with the hard negatives the model currently finds most difficult.</li>
+    <li><code>--augment …</code>: the label-safe subset (geometry, blur, small
+    erasures) — never the photometric ops on intensity-coded classes. Add your
+    own domain augmentations with <code>--augment-plugin</code>.</li>
+  </ul>
+  <p class="syn"><strong>Read the run before changing anything.</strong> If
+  <code>max_recall</code> in <code>metrics.csv</code> clears the target but the
+  swept recall doesn't, the problem is the operating point — lower
+  <code>--min-threshold</code> or accept less specificity; no training change
+  will help. If <code>max_recall</code> itself is short, the representation
+  is the limit — the report's per-class pages and the yellow-vs-red borders
+  say which class and whether it is threshold-fixable (yellow) or a genuine
+  confusion (red).</p>
+  <p class="syn"><strong>When that still is not enough</strong>, in order:
+  (1) curate — <code>python curate.py data.h5</code> to remove mislabeled or
+  ambiguous snippets, which beats any loss function; (2) pin a stubborn class
+  by hand with <code>--class-alpha NAME=2.5</code> on top of the auto alphas;
+  (3) search the loss/optimizer space cheaply at low effort, then retrain the
+  winner at full effort:</p>
+  <pre><code>python train.py data.h5 --smart 1 --recall-first 3 --class-alpha-auto --ema ^
+    --recall-agg harmonic --optuna 30 --optuna-prune-warmup 6 ^
+    --out-dir runs/hard_search
+python train.py --config runs/hard_search/trial_NNN/config.json ^
+    --smart 4 --out-dir runs/hard2</code></pre>
+  <p class="syn">Pinned flags (everything explicit above) stay fixed across
+  trials; the default space searches lr, weight decay, optimizer, focal gamma,
+  hn-alpha-end, and recall-first. For datasets past ~20 GB, rewrite with
+  <code>optimize_h5.py --sort-split</code> first so the every-epoch validation
+  pass streams instead of seeking.</p>
+
   <h3>Offline machine</h3>
   <pre><code># connected box
 python download_weights.py --out-dir pretrained
