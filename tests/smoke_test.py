@@ -274,11 +274,17 @@ def main() -> None:
     run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
         "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
         "--out-dir", OUT_ROOT / "run_plugin", "--no-report", "--patience",
-        "0", "--class-alpha-auto", "0.99",
+        "0", "--class-alpha-auto", "0.99", "--ema",
         "--augment-plugin", REPO / "example_augment_plugin.py",
         "--augment", "hflip:p=1.0", "gaussnoise:p=1.0,sigma=5",
         "gridmask:p=1.0", "coldrop:p=1.0,frac=0.2", "--seed", "1", "--no-progress", *GPU_TRAIN)
     assert (OUT_ROOT / "run_plugin" / "metrics.csv").exists()
+    # --ema: the checkpoint deploys the averaged twin (model_state) and keeps
+    # the raw training weights + the twin's step count for resume
+    ck_ema = torch.load(ck(OUT_ROOT / "run_plugin", "best"), map_location="cpu",
+                        weights_only=False)
+    assert ck_ema["raw_model_state"] is not None and ck_ema["ema_updates"] > 0, \
+        "EMA twin missing from the checkpoint"
 
     # non-uint8 storage: uint16 grayscale trains end to end; a float32
     # [0,1] file trains and survives an optimize round trip byte-true

@@ -431,6 +431,33 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     &gt; 0; <code>0</code> gives plain SGD). Ignored by adamw.</p>
   </div>
 
+  <div class="arg" id="t-ema">
+    <div class="arg-head"><span class="flag">--ema</span><span class="badge">DECAY · optional value</span><span class="badge">default: off · bare flag = 0.999</span></div>
+    <p>Keep an <strong>exponential moving average of the weights</strong>
+    alongside the model being trained, and use the averaged twin for
+    everything that judges the run: the per-epoch validation pass, the
+    threshold sweep, checkpoint selection, and the stored weights. Each
+    optimizer step updates the twin as <code>ema ← d·ema + (1−d)·model</code>
+    (parameters and BatchNorm statistics alike); a warmup
+    <code>d_t = min(decay, (1+t)/(10+t))</code> lets the average track the
+    model from the first steps instead of clinging to the initial weights
+    for ~1/(1−decay) updates, so short runs benefit too. Why it matters on
+    imbalanced data: rare classes contribute few, high-variance gradient
+    steps, and averaging over hundreds of steps smooths exactly that noise —
+    tail recall and the stability of the operating point both tend to
+    improve at essentially zero cost. <code>0.999</code> suits runs of
+    thousands of steps; <code>0.99</code> for short ones.</p>
+    <p>Checkpoint layout with EMA on: <code>model_state</code> is always the
+    <em>deployed</em> weights — the EMA twin — so <code>evaluate.py</code>,
+    <code>inference.py</code>, and the reports need no changes, and the stored
+    thresholds were swept on exactly those weights. <code>raw_model_state</code>
+    keeps the underlying training weights and <code>ema_updates</code> the
+    twin's step count, so <code>--resume</code> continues both the training
+    and the averaging rather than restarting either; smart-mode rewinds
+    restore both twins from the milestone. Runs without <code>--ema</code>
+    are unchanged (no twin stored).</p>
+  </div>
+
   <div class="arg" id="t-seed">
     <div class="arg-head"><span class="flag">--seed</span><span class="badge">int</span><span class="badge">default: 0</span></div>
     <p>Seeds Python, NumPy, and torch RNGs, and parameterizes the sampler: the
@@ -1815,7 +1842,12 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
   threshold(s)</strong> — the global scalar plus, in per-class mode, the
   {class: threshold} map and the floor — that epoch's validation metrics, the
   best-so-far selection key, miner scores, and ramp progress. Everything needed
-  to resume training <em>or</em> to run correct inference lives in the one file.</p>
+  to resume training <em>or</em> to run correct inference lives in the one file.
+  With <code>--ema</code>, <code>model_state</code> holds the averaged (deployed)
+  weights that the thresholds were swept on, and two extra keys —
+  <code>raw_model_state</code> (the underlying training weights) and
+  <code>ema_updates</code> (the twin's step count) — let <code>--resume</code>
+  continue both training and averaging exactly where they left off.</p>
 </section>
 
 <section class="tool" id="recipes">

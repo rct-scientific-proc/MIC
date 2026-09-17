@@ -147,6 +147,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "~10x higher --lr than adamw's default")
     t.add_argument("--momentum", type=float, default=0.9,
                    help="sgd only: momentum (nesterov when > 0)")
+    t.add_argument("--ema", type=float, nargs="?", const=0.999, default=None,
+                   metavar="DECAY",
+                   help="keep an exponential moving average of the weights "
+                        "(bare flag = decay 0.999, warmed up from short "
+                        "runs' first steps) and validate, sweep thresholds "
+                        "on, and checkpoint the EMA weights - rare classes' "
+                        "few, noisy gradient steps average out. Checkpoints "
+                        "store the EMA weights as model_state (what "
+                        "evaluate/inference load) plus raw_model_state so "
+                        "--resume continues the underlying training")
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default=None, help="cuda / cpu (default: auto)")
     t.add_argument("--workers", type=int, default=0, help="DataLoader workers")
@@ -446,6 +456,8 @@ def parse_args(argv=None, overrides=None) -> argparse.Namespace:
                 "troughs)")
     if args.class_alpha_auto is not None and not 0 <= args.class_alpha_auto < 1:
         p.error("--class-alpha-auto: beta must be in [0, 1)")
+    if args.ema is not None and not 0 < args.ema < 1:
+        p.error("--ema: decay must be in (0, 1)")
     if args.optuna is not None and args.optuna < 1:
         p.error("--optuna expects a positive trial count")
     if args.optuna and args.resume:
@@ -522,6 +534,46 @@ def parse_class_alphas(pairs, classes, hn_index) -> dict[int, float]:
     return out
 
 
+class _EmaUpdate:
+    """AveragedModel multi_avg_fn: EMA with a warmup so the average tracks
+    the model from the first steps instead of clinging to the initial
+    weights for ~1/(1-decay) updates (decay_t = min(decay, (1+t)/(10+t)));
+    non-float buffers (BatchNorm's num_batches_tracked) are copied."""
+
+    def __init__(self, decay: float):
+        self.decay = decay
+        self.n = 0  # float-group updates so far (one per optimizer step)
+
+    def __call__(self, ema_params, params, _num_averaged):
+        if torch.is_floating_point(ema_params[0]):
+            self.n += 1
+            d = min(self.decay, (1 + self.n) / (10 + self.n))
+            torch._foreach_lerp_(ema_params, params, 1 - d)
+        else:
+            for e, p in zip(ema_params, params):
+                e.copy_(p)
+
+
+def build_ema(model, decay: float):
+    """EMA twin of `model` (parameters and buffers) that validation and
+    checkpoints use as the deployed weights."""
+    from torch.optim.swa_utils import AveragedModel
+    return AveragedModel(model, multi_avg_fn=_EmaUpdate(decay),
+                         use_buffers=True)
+
+
+def load_weights(ckpt: dict, model, ema_model=None) -> None:
+    """Restore weights from a checkpoint: the underlying training weights
+    (raw_model_state when the checkpoint holds EMA weights as model_state,
+    else model_state) and, when EMA is on, the EMA weights and their update
+    count, so averaging continues instead of restarting."""
+    model.load_state_dict(ckpt.get("raw_model_state") or ckpt["model_state"])
+    if ema_model is not None:
+        ema_model.module.load_state_dict(ckpt["model_state"])
+        ema_model.n_averaged.fill_(1)  # lerp from here on, never re-copy
+        ema_model.multi_avg_fn.n = int(ckpt.get("ema_updates") or 0)
+
+
 def build_optimizer(args, model) -> torch.optim.Optimizer:
     """The training optimizer; smart-mode rewinds rebuild it fresh too."""
     if args.optimizer == "sgd":
@@ -540,7 +592,8 @@ def seed_everything(seed: int) -> None:
 
 
 def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
-                    miner=None, desc: str = "train", progress: bool = True) -> float:
+                    miner=None, ema_model=None, desc: str = "train",
+                    progress: bool = True) -> float:
     model.train()
     total_loss, total_n = 0.0, 0
     bar = tqdm(loader, desc=desc, unit="batch", leave=False, disable=not progress)
@@ -556,6 +609,8 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        if ema_model is not None:
+            ema_model.update_parameters(model)
 
         if miner is not None:
             # difficulty = 1 - p(true class): alpha-free and bounded in
@@ -638,9 +693,17 @@ def selection_key(op: dict) -> tuple:
 
 def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classes,
                     hn_index, op, best_key, miner=None, ramp_progress=0,
-                    controller=None) -> None:
+                    controller=None, ema_model=None) -> None:
+    # model_state is always the DEPLOYED weights (the EMA twin when --ema is
+    # on); raw_model_state keeps the underlying training weights for resume
+    deploy = ema_model.module if ema_model is not None else model
     torch.save({
-        "model_state": model.state_dict(),
+        "model_state": deploy.state_dict(),
+        "raw_model_state": (model.state_dict() if ema_model is not None
+                            else None),
+        "ema_decay": args.ema,
+        "ema_updates": (ema_model.multi_avg_fn.n if ema_model is not None
+                        else None),
         "optimizer_state": optimizer.state_dict(),
         "scaler_state": scaler.state_dict(),
         "epoch": epoch,
@@ -734,6 +797,11 @@ def train(args, on_epoch_end=None) -> dict:
                           hn_alpha=hn_alpha0).to(device)
     optimizer = build_optimizer(args, model)
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
+    ema_model = build_ema(model, args.ema) if args.ema is not None else None
+    eval_model = ema_model if ema_model is not None else model
+    if ema_model is not None:
+        print(f"weight EMA: decay {args.ema:g} (validation, thresholds and "
+              "checkpoints use the averaged weights)")
 
     base_alphas = {}
     if args.class_alpha_auto is not None:
@@ -783,7 +851,7 @@ def train(args, on_epoch_end=None) -> dict:
                 f"--resume: checkpoint was trained with '{ck_opt}' but "
                 f"--optimizer {args.optimizer} was requested; optimizer "
                 "state cannot carry over - resume with the same optimizer")
-        model.load_state_dict(ckpt["model_state"])
+        load_weights(ckpt, model, ema_model)
         optimizer.load_state_dict(ckpt["optimizer_state"])
         scaler.load_state_dict(ckpt["scaler_state"])
         start_epoch = ckpt["epoch"] + 1
@@ -850,8 +918,9 @@ def train(args, on_epoch_end=None) -> dict:
         progress = not args.no_progress
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer,
                                      scaler, device, amp, miner=miner,
+                                     ema_model=ema_model,
                                      desc=f"epoch {epoch} train", progress=progress)
-        op = validate(model, val_loader, device, hn_index, args.target_recall,
+        op = validate(eval_model, val_loader, device, hn_index, args.target_recall,
                       args.recall_agg, min_threshold=args.min_threshold,
                       threshold_mode=args.threshold_mode,
                       per_class_min_count=args.per_class_min_count, amp=amp,
@@ -869,7 +938,8 @@ def train(args, on_epoch_end=None) -> dict:
         ckpt_kw = dict(model=model, optimizer=optimizer, scaler=scaler,
                        epoch=epoch, args=args, classes=classes,
                        hn_index=hn_index, op=op, miner=miner,
-                       ramp_progress=ramp_progress, controller=controller)
+                       ramp_progress=ramp_progress, controller=controller,
+                       ema_model=ema_model)
         if controller is not None:
             improved_this_cycle = improved_this_cycle or improved
             if controller.observe(key):
@@ -906,7 +976,7 @@ def train(args, on_epoch_end=None) -> dict:
                 if base_event in ("rewind", "ceiling") and (out_dir / "milestone.pt").exists():
                     mckpt = torch.load(out_dir / "milestone.pt",
                                        map_location=device, weights_only=False)
-                    model.load_state_dict(mckpt["model_state"])
+                    load_weights(mckpt, model, ema_model)
                     optimizer = build_optimizer(args, model)
                     scaler = torch.amp.GradScaler(device.type, enabled=amp)
                     op_for_last = mckpt["val_metrics"]
@@ -978,7 +1048,7 @@ def train(args, on_epoch_end=None) -> dict:
                         scaler=scaler, epoch=epoch, args=args, classes=classes,
                         hn_index=hn_index, op=op_for_last, miner=miner,
                         ramp_progress=ramp_progress, controller=controller,
-                        best_key=best_key)
+                        best_key=best_key, ema_model=ema_model)
         prune_role(out_dir, "last", last_path)
 
         if on_epoch_end is not None and on_epoch_end(epoch, op):
