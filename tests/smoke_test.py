@@ -70,6 +70,8 @@ def main() -> None:
     ]
     # short first leg with multiprocess loading (the Windows-sensitive path)
     run(*common, "--epochs", "3", "--workers", "2")
+    lrs = [r["lr"] for r in csv.DictReader(open(out / "metrics.csv"))]
+    assert len(set(lrs)) == len(lrs) == 3, f"cosine schedule not applied: {lrs}"
     for name in ("metrics.csv", "class_thresholds.csv"):
         assert (out / name).exists(), f"missing {out / name}"
     print("checkpoints:", ck(out, "best").name, "/", ck(out, "last").name)

@@ -391,11 +391,38 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
 
   <div class="arg" id="t-lr">
     <div class="arg-head"><span class="flag">--lr</span><span class="badge">float</span><span class="badge">default: 3e-4</span></div>
-    <p>AdamW learning rate, constant for the whole run (no scheduler). 3e-4 is a
-    solid fine-tuning rate for pretrained backbones; from-scratch training
-    (<code>--no-pretrained</code>) sometimes wants 1e-3. If the ramp is enabled and
-    metrics oscillate when hard-negative pressure steps up, lowering the LR is the
-    first knob to reach for.</p>
+    <p>Peak learning rate. In fixed-ramp mode it is the top of the
+    <code>--lr-schedule</code> (cosine by default — see below); under
+    <code>--smart</code> it is each cycle's starting rate. 3e-4 is a solid
+    fine-tuning rate for pretrained backbones; from-scratch training
+    (<code>--no-pretrained</code>) sometimes wants 1e-3, and SGD roughly 10×
+    AdamW's value. If the ramp is enabled and metrics oscillate when
+    hard-negative pressure steps up, lowering the LR is the first knob to
+    reach for.</p>
+  </div>
+
+  <div class="arg" id="t-lr-schedule">
+    <div class="arg-head"><span class="flag">--lr-schedule</span><span class="badge">cosine | constant</span><span class="badge">default: cosine</span></div>
+    <p>Fixed-ramp mode learning-rate schedule (ignored under
+    <code>--smart</code>, which runs its own cyclic half-cosine).
+    <strong>cosine</strong> anneals from <code>--lr</code> down to
+    <code>--lr-min</code> at the final epoch after the warmup below — the
+    standard way to get a settled, lower-noise final model, which matters
+    more than usual when rare classes' few gradient steps dominate late
+    training; <strong>constant</strong> holds <code>--lr</code> throughout
+    (the pre-schedule behavior). The schedule is a pure function of the
+    epoch index, so <code>--resume</code> lands exactly where it left off,
+    and the per-epoch rate is logged in <code>metrics.csv</code>'s
+    <code>lr</code> column. Early stopping simply cuts the schedule short.</p>
+  </div>
+
+  <div class="arg" id="t-warmup-epochs">
+    <div class="arg-head"><span class="flag">--warmup-epochs</span><span class="badge">int</span><span class="badge">default: 1</span></div>
+    <p>Fixed-ramp mode: epochs of linear warmup before the schedule proper
+    (epoch <em>e</em> of <em>w</em> runs at <code>lr·(e+1)/(w+1)</code>;
+    <code>0</code> disables). A gentle first epoch keeps a freshly attached
+    classifier head from yanking pretrained features around while its random
+    weights are still large-gradient. Ignored under <code>--smart</code>.</p>
   </div>
 
   <div class="arg" id="t-weight-decay">
@@ -830,7 +857,9 @@ ceiling  &gt; --max-rewinds failures at one level -> accept the stable
   <div class="arg" id="t-lr-min">
     <div class="arg-head"><span class="flag">--lr-min</span><span class="badge">float</span><span class="badge">default: per level</span></div>
     <p>Trough learning rate. The half-cosine reaches it on the cycle's last
-    epoch — the epoch whose settled state the boundary decision judges.</p>
+    epoch — the epoch whose settled state the boundary decision judges. It
+    is also the floor of the fixed-ramp <code>--lr-schedule cosine</code>
+    (default there: <code>--lr</code> / 25).</p>
   </div>
 
   <div class="arg" id="t-pressure-step">

@@ -139,6 +139,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="training epochs (default: 50, or per --smart level)")
     t.add_argument("--batch-size", type=int, default=64)
     t.add_argument("--lr", type=float, default=3e-4)
+    t.add_argument("--lr-schedule", choices=("cosine", "constant"),
+                   default="cosine",
+                   help="fixed-ramp mode: cosine anneals from --lr down to "
+                        "--lr-min at the final epoch after --warmup-epochs "
+                        "of linear warmup; constant holds --lr throughout. "
+                        "Ignored under --smart, which runs its own cyclic "
+                        "schedule")
+    t.add_argument("--warmup-epochs", type=int, default=1,
+                   help="fixed-ramp mode: epochs of linear LR warmup before "
+                        "the schedule proper (0 = none); pretrained "
+                        "fine-tuning likes a gentle first epoch")
     t.add_argument("--weight-decay", type=float, default=1e-4)
     t.add_argument("--optimizer", choices=("adamw", "sgd"), default="adamw",
                    help="adamw (default: decoupled weight decay, forgiving of "
@@ -274,8 +285,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="epochs per LR cycle; decisions happen at the trough "
                         "(default: per --smart level)")
     s.add_argument("--lr-min", type=float, default=None,
-                   help="trough learning rate (default: --lr divided per "
-                        "--smart level: 10/20/25/50/100)")
+                   help="trough learning rate of smart cycles, and the floor "
+                        "of the fixed-ramp cosine schedule (default: --lr "
+                        "divided per --smart level: 10/20/25/50/100; --lr/25 "
+                        "in fixed-ramp mode)")
     s.add_argument("--pressure-step", type=float, default=None,
                    help="initial pressure increment per successful cycle "
                         "(default: per --smart level)")
@@ -650,6 +663,22 @@ def pressure_values(args, f: float, n_genuine: int, n_hn: int) -> tuple[float, f
     return hn_alpha, ratio
 
 
+def scheduled_lr(args, epoch: int) -> float:
+    """Fixed-ramp mode learning rate for `epoch`: linear warmup over
+    --warmup-epochs, then cosine from --lr down to --lr-min at the final
+    epoch (or a flat --lr with --lr-schedule constant). A pure function of
+    the epoch, so --resume lands exactly where the schedule left off."""
+    w = max(0, args.warmup_epochs)
+    if epoch < w:
+        return args.lr * (epoch + 1) / (w + 1)
+    if args.lr_schedule == "constant":
+        return args.lr
+    span = max(1, args.epochs - w)          # epochs the cosine covers
+    t = min(epoch - w, span - 1)
+    return args.lr_min + 0.5 * (args.lr - args.lr_min) * (
+        1 + math.cos(math.pi * t / max(span - 1, 1)))
+
+
 def ramp_values(args, ramp_progress: int, n_genuine: int, n_hn: int) -> tuple[float, float]:
     """(hn_alpha, imbalance_ratio) at the given ramp progress (fixed-ramp
     mode; ramp_epochs == 0 means the end values apply from epoch 0)."""
@@ -906,7 +935,9 @@ def train(args, on_epoch_end=None) -> dict:
             sampler.set_genuine_repeats(repeats_used)
         else:
             hn_alpha, ratio = ramp_values(args, ramp_progress, n_genuine, n_hn)
-            lr = args.lr
+            lr = scheduled_lr(args, epoch)
+            for g in optimizer.param_groups:
+                g["lr"] = lr
             p_used, cycle_used = "", ""
             class_alphas = {c: base_alphas.get(c, 1.0)
                             for c in range(len(classes)) if c != hn_index}
