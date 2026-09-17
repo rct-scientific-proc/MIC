@@ -14,13 +14,14 @@ import numpy as np
 import torch
 from torch.utils.data import Sampler
 
-# Fresh, never-seen hard negatives start with a high score so they are drawn
-# before well-classified ones. Focal losses are typically << 10.
-INITIAL_SCORE = 10.0
+# Mining scores are difficulties in [0, 1] (1 - p of the true class, see
+# train_one_epoch). Fresh, never-seen hard negatives start above that range
+# so they are drawn before anything already examined.
+INITIAL_SCORE = 2.0
 
 
 class HardNegativeMiner:
-    """Tracks a per-sample EMA of training error for hard negatives.
+    """Tracks a per-sample EMA of training difficulty for hard negatives.
 
     Indexed by position within the training split (matching the `index`
     returned by H5SnippetDataset.__getitem__).
@@ -33,8 +34,8 @@ class HardNegativeMiner:
         self.seen = np.zeros(len(labels), dtype=bool)
 
     def update(self, indices: torch.Tensor, losses: torch.Tensor) -> None:
-        """Record per-sample losses for a training batch (any subset; only
-        hard-negative entries are tracked)."""
+        """Record per-sample difficulties for a training batch (any subset;
+        only hard-negative entries are tracked)."""
         idx = indices.detach().cpu().numpy()
         loss = losses.detach().cpu().numpy().astype(np.float64)
 

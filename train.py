@@ -558,7 +558,13 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
         scaler.update()
 
         if miner is not None:
-            miner.update(idxs, per_sample)
+            # difficulty = 1 - p(true class): alpha-free and bounded in
+            # [0, 1], so mining scores stay comparable as the pressure ramp
+            # and rescue change the loss weighting
+            with torch.no_grad():
+                p_y = torch.softmax(logits.float(), dim=1).gather(
+                    1, labs.unsqueeze(1)).squeeze(1)
+            miner.update(idxs, 1.0 - p_y)
 
         total_loss += float(loss.detach()) * len(labs)
         total_n += len(labs)

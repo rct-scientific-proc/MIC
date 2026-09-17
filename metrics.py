@@ -23,7 +23,10 @@ Hard-negative specificity is the fraction of hard negatives rejected
 sweep_threshold picks the LARGEST threshold whose aggregated recall still
 meets the target — recall is monotone non-increasing in the threshold, so
 this is the operating point with maximum specificity subject to the recall
-constraint. A configurable floor (min_threshold) is never crossed: if the
+constraint. The stored value is placed halfway between that cut's score and
+the next lower distinct score: the same samples are accepted, but the
+operating point no longer sits exactly on a validation sample, so a ~1e-3
+wobble between fp32 and AMP scores cannot flip it. A configurable floor (min_threshold) is never crossed: if the
 target is only reachable below it, the sweep operates exactly at the floor
 and reports target_met=False.
 
@@ -133,6 +136,17 @@ def _choose_cut(s_sorted: np.ndarray, curve: np.ndarray, target: float,
     return int((s_sorted >= floor).sum()) - 1, False
 
 
+def _cut_threshold(s_sorted: np.ndarray, k: int, floor: float) -> float:
+    """The threshold realizing cut k with maximum margin: halfway between
+    the cut's score and the next lower distinct score (accepting s >= t
+    still takes exactly the cut group). Never below the floor; the cut's
+    own score when nothing lies below it."""
+    hi = float(s_sorted[k])
+    if k + 1 < len(s_sorted):
+        return max(float(floor), 0.5 * (hi + float(s_sorted[k + 1])))
+    return hi
+
+
 def sweep_threshold(
     probs: np.ndarray,
     labels: np.ndarray,
@@ -185,7 +199,8 @@ def sweep_threshold(
     cum_hn_accepted = np.cumsum(~genuine[order])
 
     k, target_met = _choose_cut(s_sorted, agg_curve, target_recall, min_threshold)
-    threshold = float(s_sorted[k]) if target_met else float(min_threshold)
+    threshold = (_cut_threshold(s_sorted, k, min_threshold) if target_met
+                 else float(min_threshold))
 
     if k >= 0:
         recall = float(agg_curve[k])
@@ -261,7 +276,8 @@ def sweep_class_thresholds(
         s_sorted = scores[part][order]
         curve = np.cumsum(labels[part][order] == c) / n_true
         k, ok = _choose_cut(s_sorted, curve, target_recall, min_threshold)
-        thresholds[c] = float(s_sorted[k]) if ok else float(min_threshold)
+        thresholds[c] = (_cut_threshold(s_sorted, k, min_threshold) if ok
+                         else float(min_threshold))
         met[c] = ok
 
     res = apply_threshold(probs, labels, hn_index, thresholds, agg=agg)

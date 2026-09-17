@@ -519,7 +519,11 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     epoch, candidate thresholds are every distinct score value in the validation
     split; the sweep keeps the largest one whose aggregated recall over genuine
     classes is ≥ this target, then reports hard-negative specificity at that
-    threshold. If no threshold achieves the target, the epoch records
+    threshold. The <em>stored</em> value is placed halfway between that
+    score and the next lower distinct score — the same validation samples are
+    accepted, but the operating point no longer sits exactly on a sample, so
+    the ~1e-3 wobble between fp32 and AMP scores (or any borderline sample at
+    inference) cannot flip it. If no threshold achieves the target, the epoch records
     <code>target_met = 0</code> with threshold 0 (accept everything) and the
     achievable ceiling is logged as <code>max_recall</code>.</p>
     <ul>
@@ -871,12 +875,19 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
 
   <h3>Hard-negative mining</h3>
   <p class="syn">When the imbalance cap forces subsampling, mining decides which hard
-  negatives fill the budget. Each hard negative carries an EMA of its focal loss
-  (<code>score ← 0.7·score + 0.3·loss</code>, first observation taken directly);
-  unseen samples start at a high sentinel score so everything gets tried before
-  anything is written off. High-score (poorly handled) hard negatives are drawn
-  preferentially via weighted sampling without replacement. Scores persist in
-  checkpoints.</p>
+  negatives fill the budget. Each hard negative carries an EMA of its
+  <strong>difficulty</strong>, <code>1 − p(true class)</code> in [0, 1]
+  (<code>score ← 0.7·score + 0.3·difficulty</code>, first observation taken
+  directly); unseen samples start at a sentinel of 2.0 — above any real
+  difficulty — so everything gets tried before anything is written off.
+  Difficulty rather than the focal loss itself keeps scores comparable over
+  time: the loss is scaled by the hard-negative alpha, which the pressure ramp
+  and rescue change by 20× or more across a run, so loss-based scores from
+  different eras would not be comparable and mining would silently favor
+  whichever era's samples were scored last. High-difficulty hard negatives
+  are drawn preferentially via weighted sampling without replacement. Scores
+  persist in checkpoints (a checkpoint from before this change carries
+  loss-scale scores that self-correct as samples are revisited).</p>
 
   <div class="arg" id="t-no-mining">
     <div class="arg-head"><span class="flag">--no-mining</span><span class="badge">switch</span><span class="badge">default: off (mining on)</span></div>
