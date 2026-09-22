@@ -29,7 +29,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from checkpoints import find_checkpoint
+from checkpoints import find_checkpoint, load_checkpoint
 from dataset import SPLIT_NAMES, SPLIT_TEST, H5SnippetDataset, validate_h5
 from metrics import (apply_threshold, calibration_bins, collect_probs,
                      final_prediction, genuine_vs_hn_roc, per_class_ovr_roc)
@@ -73,7 +73,7 @@ def main(argv=None) -> None:
     ckpt_path = find_checkpoint(args.checkpoint, "best")
     if ckpt_path is None:
         raise SystemExit(f"no checkpoint found at {args.checkpoint}")
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    ckpt = load_checkpoint(ckpt_path, device)
     classes = ckpt["classes"]
     hn_index = ckpt["hard_negative_index"]
     threshold = ckpt["threshold"]

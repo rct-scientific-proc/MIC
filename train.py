@@ -33,7 +33,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from checkpoints import checkpoint_name, find_checkpoint, prune_role
+from checkpoints import (atomic_save, checkpoint_name, find_checkpoint,
+                         load_checkpoint, prune_role)
 from controller import SmartController
 from dataset import (AUGMENTATIONS, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
                      load_augmentation_plugins, validate_h5)
@@ -176,6 +177,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="early-stop after N epochs (smart mode: N cycles) "
                         "without improvement; 0 = off (default: 10, or per "
                         "--smart level)")
+    t.add_argument("--save-every", type=int, default=1, metavar="N",
+                   help="write the resumable 'last' checkpoint every N epochs "
+                        "(always on the final epoch); best checkpoints are "
+                        "unaffected. Raise on slow disks - each last "
+                        "checkpoint carries the optimizer state and can be "
+                        "hundreds of MB")
     t.add_argument("--no-progress", action="store_true",
                    help="disable per-batch progress bars (for logged runs)")
 
@@ -471,6 +478,8 @@ def parse_args(argv=None, overrides=None) -> argparse.Namespace:
         p.error("--class-alpha-auto: beta must be in [0, 1)")
     if args.ema is not None and not 0 < args.ema < 1:
         p.error("--ema: decay must be in (0, 1)")
+    if args.save_every < 1:
+        p.error("--save-every must be >= 1")
     if args.optuna is not None and args.optuna < 1:
         p.error("--optuna expects a positive trial count")
     if args.optuna and args.resume:
@@ -726,7 +735,7 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
     # model_state is always the DEPLOYED weights (the EMA twin when --ema is
     # on); raw_model_state keeps the underlying training weights for resume
     deploy = ema_model.module if ema_model is not None else model
-    torch.save({
+    atomic_save({
         "model_state": deploy.state_dict(),
         "raw_model_state": (model.state_dict() if ema_model is not None
                             else None),
@@ -873,7 +882,7 @@ def train(args, on_epoch_end=None) -> dict:
         resume_path = find_checkpoint(args.resume, "last")
         if resume_path is None:
             raise SystemExit(f"--resume: no checkpoint found at {args.resume}")
-        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        ckpt = load_checkpoint(resume_path, device)
         ck_opt = (ckpt.get("config") or {}).get("optimizer", "adamw")
         if ck_opt != args.optimizer:
             raise SystemExit(
@@ -1005,8 +1014,7 @@ def train(args, on_epoch_end=None) -> dict:
                 if rescued:
                     event += " rescue:" + ",".join(classes[c] for c in rescued)
                 if base_event in ("rewind", "ceiling") and (out_dir / "milestone.pt").exists():
-                    mckpt = torch.load(out_dir / "milestone.pt",
-                                       map_location=device, weights_only=False)
+                    mckpt = load_checkpoint(out_dir / "milestone.pt", device)
                     load_weights(mckpt, model, ema_model)
                     optimizer = build_optimizer(args, model)
                     scaler = torch.amp.GradScaler(device.type, enabled=amp)
@@ -1074,13 +1082,21 @@ def train(args, on_epoch_end=None) -> dict:
         # The last checkpoint carries the post-decision state (post-rewind
         # weights and controller state), so --resume continues exactly where
         # the controller left off; its metrics/threshold match its weights.
-        last_path = out_dir / checkpoint_name("last", epoch, op_for_last)
-        save_checkpoint(last_path, model=model, optimizer=optimizer,
-                        scaler=scaler, epoch=epoch, args=args, classes=classes,
-                        hn_index=hn_index, op=op_for_last, miner=miner,
-                        ramp_progress=ramp_progress, controller=controller,
-                        best_key=best_key, ema_model=ema_model)
-        prune_role(out_dir, "last", last_path)
+        # the resumable checkpoint every --save-every epochs and always on
+        # the run's final epoch (slow disks: fewer multi-hundred-MB writes)
+        final = (stop or epoch == args.epochs - 1
+                 or (controller is None and args.patience
+                     and epochs_since_best >= args.patience))
+        if final or (epoch + 1) % args.save_every == 0:
+            last_path = out_dir / checkpoint_name("last", epoch, op_for_last)
+            save_checkpoint(last_path, model=model, optimizer=optimizer,
+                            scaler=scaler, epoch=epoch, args=args,
+                            classes=classes, hn_index=hn_index,
+                            op=op_for_last, miner=miner,
+                            ramp_progress=ramp_progress,
+                            controller=controller, best_key=best_key,
+                            ema_model=ema_model)
+            prune_role(out_dir, "last", last_path)
 
         if on_epoch_end is not None and on_epoch_end(epoch, op):
             print(f"stopped after epoch {epoch} (pruned)")

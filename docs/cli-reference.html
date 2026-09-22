@@ -542,6 +542,21 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     the ramp out — patience &lt; ramp recovery time can stop the run mid-ramp.</div>
   </div>
 
+  <div class="arg" id="t-save-every">
+    <div class="arg-head"><span class="flag">--save-every</span><span class="badge">int · N epochs</span><span class="badge">default: 1</span></div>
+    <p>Write the resumable <code>last</code> checkpoint every N epochs instead
+    of every epoch; the run's final epoch always writes one, so
+    <code>--resume</code> and the end-of-run report never miss the end of
+    the run. <code>best</code> checkpoints are unaffected — they are written
+    whenever the selection key improves. The <code>last</code> file carries
+    the optimizer state (Adam's two moments double the weight size) and the
+    controller/miner state, so on a resnet50 it can be several hundred MB per
+    epoch; on a slow or networked disk that steady write stream is what
+    saturates the storage and stalls the run directory. <code>5</code> or
+    <code>10</code> trades at most that many epochs of lost progress on a
+    crash for a fraction of the I/O.</p>
+  </div>
+
   <div class="arg" id="t-no-progress">
     <div class="arg-head"><span class="flag">--no-progress</span><span class="badge">switch</span><span class="badge">default: off (bars shown)</span></div>
     <p>Disables the per-batch tqdm progress bars (one per training epoch with a
@@ -1877,6 +1892,27 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
   <code>raw_model_state</code> (the underlying training weights) and
   <code>ema_updates</code> (the twin's step count) — let <code>--resume</code>
   continue both training and averaging exactly where they left off.</p>
+
+  <h3>Slow and networked storage</h3>
+  <p>A saturated HDD, an SMB/NFS share, or a scanned/synced folder can refuse
+  to reopen or delete a file the process wrote moments ago — surfacing as
+  <em>permission denied</em> (EACCES/EPERM/EBUSY) even though nothing
+  changed any permissions, typically right when a just-written checkpoint
+  is reloaded for a rewind or the final report, or when the previous
+  epoch's checkpoint is pruned. A file explorer hanging for minutes on the
+  run directory during these episodes is the tell: the storage itself is
+  stalled. All checkpoint I/O is built for this: every checkpoint is written
+  through a temp file in the same directory and swapped in with one
+  <code>os.replace</code> (readers never see a half-written file, and
+  nothing is truncated in place); every load, copy, and delete retries
+  transient errors with backoff for about a minute, printing each
+  <code>[io] … retry k/8</code> line so a stalled disk reads as waiting
+  rather than a silent hang; and a housekeeping delete that still fails is
+  a warning, never a dead run — a stale extra checkpoint is harmless because
+  discovery picks the newest file. Missing or corrupt files still fail
+  immediately. On a slow disk also raise <code>--save-every</code>: the
+  resumable checkpoint carries the optimizer state and can run to hundreds
+  of MB per epoch.</p>
 </section>
 
 <section class="tool" id="recipes">

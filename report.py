@@ -29,7 +29,7 @@ import torch
 from fpdf import FPDF
 from torch.utils.data import DataLoader
 
-from checkpoints import find_checkpoint, utc_stamp
+from checkpoints import find_checkpoint, load_checkpoint, utc_stamp
 from dataset import SPLIT_NAMES, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset, validate_h5
 from metrics import (apply_threshold, calibration_bins, collect_probs,
                      final_prediction, genuine_vs_hn_roc, genuineness_scores,
@@ -397,9 +397,9 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
     best_path = find_checkpoint(run_dir, "best")
     if best_path is None:
         raise FileNotFoundError(f"no best checkpoint in {run_dir}")
-    best = torch.load(best_path, map_location=dev, weights_only=False)
+    best = load_checkpoint(best_path, dev)
     last_path = find_checkpoint(run_dir, "last")
-    last = (torch.load(last_path, map_location=dev, weights_only=False)
+    last = (load_checkpoint(last_path, dev)
             if last_path is not None else best)
     config = best.get("config") or {}
     classes = best["classes"]

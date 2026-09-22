@@ -38,7 +38,7 @@ from PIL import Image, ImageDraw
 from torchmetrics.functional.classification import binary_auroc, binary_roc
 from tqdm import tqdm
 
-from checkpoints import find_checkpoint, utc_stamp
+from checkpoints import find_checkpoint, load_checkpoint, utc_stamp
 from dataset import build_transform
 from metrics import _per_sample_thresholds, genuineness_scores, non_hn_argmax
 from model import build_model
@@ -979,7 +979,7 @@ def main(argv=None) -> None:
     ckpt_path = find_checkpoint(args.checkpoint, "best")
     if ckpt_path is None:
         raise SystemExit(f"no checkpoint found at {args.checkpoint}")
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    ckpt = load_checkpoint(ckpt_path, device)
     classes = ckpt["classes"]
     hn_index = ckpt["hard_negative_index"]
     per_class = (ckpt.get("threshold_mode") == "per-class"

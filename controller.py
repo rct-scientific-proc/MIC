@@ -36,8 +36,9 @@ raise — pressure and rescue never change in the same step.
 from __future__ import annotations
 
 import math
-import shutil
 from pathlib import Path
+
+from checkpoints import atomic_copy, remove_quietly
 
 
 class SmartController:
@@ -121,7 +122,7 @@ class SmartController:
         met = cb is not None and bool(cb[0])
 
         if met and (self.milestone_key is None or cb >= tuple(self.milestone_key)):
-            shutil.copyfile(out_dir / "cycle_best.pt", out_dir / "milestone.pt")
+            atomic_copy(out_dir / "cycle_best.pt", out_dir / "milestone.pt")
             self.milestone_key = list(cb)
             self.p_stable = self.p_try
             self.rewinds = 0
@@ -185,12 +186,12 @@ class SmartController:
             if tuple(worst[0]) >= key:
                 return
             self.snapshots.remove(worst)
-            Path(worst[1]).unlink(missing_ok=True)
+            remove_quietly(worst[1])
         spec_txt = f"{key[1]:.4f}" if math.isfinite(key[1]) else "na"
         dst = (out_dir / "snapshots" /
                f"cycle{self.cycle:03d}_rec{key[2]:.4f}_spec{spec_txt}.pt")
         dst.parent.mkdir(exist_ok=True)
-        shutil.copyfile(src, dst)
+        atomic_copy(src, dst)
         self.snapshots.append([list(key), str(dst)])
 
     # --- persistence -----------------------------------------------------

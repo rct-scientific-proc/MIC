@@ -80,7 +80,11 @@ def main() -> None:
     # learn (random init needs ~15 epochs on this data); workers=0 is much
     # faster at this size. Passing the run DIRECTORY exercises checkpoint
     # discovery (newest last_*).
-    run(*common, "--epochs", "40", "--workers", "0", "--resume", out)
+    run(*common, "--epochs", "40", "--workers", "0", "--resume", out,
+        "--save-every", "5")
+    assert not list(out.glob("*.tmp")), "temp checkpoint left behind"
+    assert ck(out, "last").name.startswith("last_e0039"), \
+        "final epoch must always write the last checkpoint"
 
     # evaluate also accepts the run directory (newest best_*)
     run(REPO / "evaluate.py", out, h5, "--out-dir", out / "eval", *GPU)
