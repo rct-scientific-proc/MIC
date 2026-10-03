@@ -39,7 +39,7 @@ from torchmetrics.functional.classification import binary_auroc, binary_roc
 from tqdm import tqdm
 
 from checkpoints import find_checkpoint, load_checkpoint, utc_stamp
-from dataset import build_transform
+from dataset import build_transform, to_display_uint8, to_model_input
 from metrics import _per_sample_thresholds, genuineness_scores, non_hn_argmax
 from model import build_model
 from plots import (SERIES, plot_confusion_grid, plot_per_class_rocs,
@@ -221,7 +221,8 @@ def window_positions(size: int, window: int, stride: int) -> list[int]:
 @torch.no_grad()
 def infer_image(img: np.ndarray, model, transform, device, args,
                 desc: str) -> tuple[list[tuple], np.ndarray, int, int]:
-    """Slide over one image (HWC uint8); returns (coords, probs, w, h) for
+    """Slide over one image (HWC, model-input scale: uint8, or float32 in
+    [0,1] for 16-bit/float multi-band scenes); returns (coords, probs, w, h) for
     EVERY window — acceptance is decided by the caller, so ground-truth
     analytics can rank rejected windows too.
 
@@ -449,6 +450,30 @@ BORDER_RGB = {
 }
 
 
+def read_scene(path, in_channels: int, grayscale: bool) -> np.ndarray:
+    """Load one scene as an HWC array in the model's channel layout, in the
+    pipeline's model-input scale. 3-channel models read through PIL (RGB,
+    or L -> 1 channel, replicated to 3 later); multi-band models read every
+    band natively through rasterio (any GDAL raster), with uint16/float
+    handled exactly as a training file of that dtype would be."""
+    if in_channels == 3:
+        pil = Image.open(path).convert("L" if grayscale else "RGB")
+        arr = np.asarray(pil)
+        return arr[:, :, None] if arr.ndim == 2 else arr
+    try:
+        import rasterio
+    except ImportError:
+        raise SystemExit(f"this checkpoint takes {in_channels}-band input; "
+                         "reading multi-band scenes needs rasterio: "
+                         "pip install rasterio")
+    with rasterio.open(path) as src:
+        if src.count != in_channels:
+            raise SystemExit(f"{path}: {src.count} band(s), but the checkpoint "
+                             f"was trained on {in_channels}-channel snippets")
+        bands = src.read()  # (C, H, W) in the stored dtype
+    return to_model_input(np.ascontiguousarray(bands.transpose(1, 2, 0)))
+
+
 def _bordered(crop: np.ndarray, state) -> np.ndarray:
     """Copy of a window crop with a colored border: green = correct class
     and accepted, yellow = correct class but rejected by the threshold,
@@ -472,6 +497,7 @@ def draw_overlay(img: np.ndarray, detections: list[dict], classes,
                  hn_index: int, path: Path, gt_points=None) -> None:
     """Raw window boxes on the full image, one fixed color per class;
     ground-truth points (when given) as circles - green hit, red miss."""
+    img = to_display_uint8(img)  # any dtype / band count -> 1 or 3 ch uint8
     pil = Image.fromarray(img.squeeze() if img.shape[-1] == 1 else img)
     pil = pil.convert("RGB")
     draw = ImageDraw.Draw(pil)
@@ -651,7 +677,7 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
         ("stored threshold", thr_txt),
         ("windows", f"{args.window_width}x{args.window_height} px, stride "
                     f"{args.stride_x}x{args.stride_y}, "
-                    f"{'grayscale' if args.grayscale else 'RGB'} input"),
+                    f"{'grayscale' if args.grayscale else 'RGB' if getattr(args, 'in_channels', 3) == 3 else str(args.in_channels) + '-band'} input"),
         ("images", f"{len(results)} images, {total_windows} windows, "
                    f"{total_det} detections in "
                    f"{sum(1 for r in results if r['detections'])} images"),
@@ -719,11 +745,10 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
 
         def crop_of(row) -> np.ndarray:
             ri = row["img"]
-            if ri not in img_cache:
-                pil = Image.open(results[ri]["path"]).convert(
-                    "L" if args.grayscale else "RGB")
-                arr = np.asarray(pil)
-                img_cache[ri] = arr[:, :, None] if arr.ndim == 2 else arr
+            if ri not in img_cache:  # display form: uint8, 1 or 3 channels
+                img_cache[ri] = to_display_uint8(read_scene(
+                    results[ri]["path"], getattr(args, "in_channels", 3),
+                    args.grayscale))
             a = img_cache[ri]
             return a[row["y"]:row["y"] + row["h"], row["x"]:row["x"] + row["w"]]
 
@@ -986,7 +1011,13 @@ def main(argv=None) -> None:
                  and ckpt.get("class_thresholds"))
     operating = ckpt["class_thresholds"] if per_class else ckpt["threshold"]
 
-    model = build_model(ckpt["arch"], len(classes), pretrained=False).to(device)
+    in_channels = ckpt.get("in_channels", 3)
+    args.in_channels = in_channels  # for the report's crops and cover line
+    if args.grayscale and in_channels != 3:
+        raise SystemExit("--grayscale applies to 3-channel models; this "
+                         f"checkpoint takes {in_channels}-band input")
+    model = build_model(ckpt["arch"], len(classes), pretrained=False,
+                        in_channels=in_channels).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
     transform = build_transform(ckpt["imagenet_norm"])
@@ -1000,21 +1031,19 @@ def main(argv=None) -> None:
 
     results = []
     for path in gather_images(args.images, args.recursive):
-        pil = Image.open(path).convert("L" if args.grayscale else "RGB")
-        img = np.asarray(pil)
-        if img.ndim == 2:
-            img = img[:, :, None]
+        img = read_scene(path, in_channels, args.grayscale)
         coords, probs, w, h = infer_image(img, model, transform, device,
                                           args, desc=path.name)
         detections = detections_from(coords, probs, w, h, hn_index, operating)
-        r = {"path": path, "size": pil.size, "n_windows": len(coords),
+        r = {"path": path, "size": (img.shape[1], img.shape[0]),
+             "n_windows": len(coords),
              "detections": detections, "overlay": None, "gt": None}
 
         if gt_lookup is not None:
             entry = gt_lookup.get(path.name.lower()) or \
                 gt_lookup.get(path.stem.lower())
             if entry is not None:
-                r["gt"] = evaluate_gt(entry, pil.size[0], pil.size[1],
+                r["gt"] = evaluate_gt(entry, r["size"][0], r["size"][1],
                                       detections, classes)
                 gt_matched += 1
                 # keep every window's probabilities for the GT analytics

@@ -1181,7 +1181,13 @@ policy      autoaugment (ImageNet policy, no params)
     The policy-based entries
     (autoaugment/randaugment/trivialaugment) were tuned on natural-image
     benchmarks and freely apply the photometric ops — treat them as
-    convenient but aggressive, and prefer an explicit list when in doubt.</div>
+    convenient but aggressive, and prefer an explicit list when in doubt.
+    On files that are not 1- or 3-channel, <code>grayscale</code>,
+    <code>colorjitter</code>, <code>sharpness</code>, <code>autocontrast</code>,
+    and <code>randaugment</code> cannot run and are refused at startup; the
+    remaining photometric and policy ops execute per channel but were
+    designed for RGB semantics, so for multi-band data lean on the
+    geometric ops, blur, erasing, and your own plugins.</div>
     <p>Interactions: augmentation randomizes per-sample loss, so the
     hard-negative miner's EMA scores get noisier (the EMA absorbs it, but
     expect slower score convergence); the chosen list is stored in the
@@ -1398,8 +1404,15 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
     <div class="arg-head"><span class="flag">images</span><span class="badge">positional · one or more</span><span class="badge">required</span></div>
     <p>Image files and/or directories (scanned for
     png/jpg/jpeg/bmp/tif/tiff — top level only unless
-    <code>--recursive</code>). Loaded whole with Pillow and converted to RGB
-    (or grayscale with <code>--grayscale</code>).</p>
+    <code>--recursive</code>). For 3-channel checkpoints each file is loaded
+    whole with Pillow and converted to RGB (or grayscale with
+    <code>--grayscale</code>). For a checkpoint trained on any other band
+    count (<code>in_channels</code> ≠ 3), every band is read natively through
+    <strong>rasterio</strong> instead — any GDAL raster, keeping the stored
+    dtype so 16-bit or float scenes are scaled exactly as a training file of
+    that dtype would be — and a scene whose band count differs from the
+    checkpoint's is refused up front. rasterio is only required in that
+    case (an install hint is printed otherwise).</p>
   </div>
 
   <div class="arg" id="i-recursive">
@@ -1514,7 +1527,9 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
   <div class="arg" id="i-grayscale">
     <div class="arg-head"><span class="flag">--grayscale</span><span class="badge">switch</span><span class="badge">default: off (RGB)</span></div>
     <p>Convert images to grayscale before windowing (channel-repeated to 3 for
-    the model) — for models trained on grayscale snippets.</p>
+    the model) — for models trained on grayscale snippets. Only meaningful
+    for 3-channel checkpoints; a multi-band checkpoint refuses it, since its
+    scenes are read band-for-band.</p>
   </div>
 
   <div class="arg" id="i-batch">
@@ -1730,9 +1745,24 @@ float32   0.0 – 1.0    already-scaled floats — 4x the disk/IO of uint8</div>
   verified equivalent to the uint8 pipeline within quantization — so
   checkpoints transfer across storage dtypes of the same imagery, and
   sliding-window inference (which reads image files, not h5) is unaffected.
-  Grayscale storage (<code>C=1</code>) works with every dtype and is
-  expanded to three identical channels at the model input, halving-to-
-  thirding disk cost when color carries no signal. The curate GUI and all
+  <strong>Channel count</strong> is free (<code>C ≥ 1</code>) and works with
+  every dtype. Grayscale (<code>C=1</code>) is replicated to three identical
+  channels at the model input — lossless, keeps the full pretrained RGB
+  kernel, and a third the disk of RGB when color carries no signal.
+  <code>C=3</code> is native. Any other count (2-band dual-polarization SAR,
+  red+NIR, 4+-band multispectral) <strong>rebuilds the backbone's first
+  convolution for that many bands</strong>: with pretrained weights the RGB
+  kernel is tiled across the new channels and scaled by 3/C so activations
+  keep their magnitude (the timm <code>in_chans</code> recipe), so
+  multi-band data still benefits from ImageNet features. The count is
+  stored in the checkpoint (<code>in_channels</code>) and replayed by
+  evaluate, the reports, and inference — which reads multi-band scenes
+  natively through rasterio (see <code>images</code> under inference.py).
+  Two consequences for non-RGB files: the RGB-only augmentations
+  (<code>grayscale, colorjitter, sharpness, autocontrast, randaugment</code>)
+  are refused at startup with the channel-agnostic alternatives named, and
+  thumbnails render 2-band images as (band 0, band 1, their mean) false
+  color and show the first three bands of larger stacks. The curate GUI and all
   report thumbnails display every dtype correctly, and
   <code>optimize_h5.py</code> preserves the source dtype, including through
   <code>--resize</code>. Prefer uint8 unless the data genuinely holds more
@@ -1882,7 +1912,9 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
   <h3>What a checkpoint contains</h3>
   <p>Both <code>last.pt</code> and <code>best.pt</code> store: model weights, optimizer
   and AMP-scaler state, epoch index, the full CLI config, the class list and
-  hard-negative index, the <code>--imagenet-norm</code> flag, <strong>the operating
+  hard-negative index, the input channel count (<code>in_channels</code>, so a
+  2-band model rebuilds with the right stem), the <code>--imagenet-norm</code>
+  flag, <strong>the operating
   threshold(s)</strong> — the global scalar plus, in per-class mode, the
   {class: threshold} map and the floor — that epoch's validation metrics, the
   best-so-far selection key, miner scores, and ramp progress. Everything needed

@@ -95,7 +95,8 @@ def main(argv=None) -> None:
     per_class = threshold_mode == "per-class" and class_thresholds is not None
     operating = class_thresholds if per_class else threshold
 
-    model = build_model(ckpt["arch"], len(classes), pretrained=False).to(device)
+    model = build_model(ckpt["arch"], len(classes), pretrained=False,
+                        in_channels=ckpt.get("in_channels", 3)).to(device)
     model.load_state_dict(ckpt["model_state"])
 
     ds = H5SnippetDataset(args.h5, args.split, imagenet_norm=ckpt["imagenet_norm"])

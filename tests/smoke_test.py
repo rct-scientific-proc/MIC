@@ -336,6 +336,48 @@ def main() -> None:
         assert np.array_equal(f["images"][:16], s["images"][:][order][:16]), \
             "sort-split misaligned images vs labels"
 
+    # 2-channel storage: conv1 rebuilt for the band count; checkpoint
+    # records in_channels; RGB-only augmentations are refused; evaluate and
+    # (with rasterio) multi-band GeoTIFF inference replay the layout
+    h5_2ch = OUT_ROOT / "smoke_2ch.h5"
+    make_dataset(str(h5_2ch), num_genuine_classes=3, genuine_per_class=20,
+                 hn_factor=8.0, seed=4, channels=2, image_hw=(64, 64))
+    out_2ch = OUT_ROOT / "run_2ch"
+    run(REPO / "train.py", h5_2ch, "--arch", "resnet18", "--no-pretrained",
+        "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
+        "--augment", "rotation:p=0.5,degrees=10", "gaussianblur",
+        "--out-dir", out_2ch, "--no-report", "--patience", "0",
+        "--seed", "1", "--no-progress", *GPU_TRAIN)
+    ck_2ch = torch.load(ck(out_2ch, "best"), map_location="cpu",
+                        weights_only=False)
+    assert ck_2ch["in_channels"] == 2, ck_2ch.get("in_channels")
+    assert tuple(ck_2ch["model_state"]["conv1.weight"].shape) == (64, 2, 7, 7)
+    bad = subprocess.run([sys.executable, str(REPO / "train.py"), str(h5_2ch),
+                          "--epochs", "1", "--augment", "colorjitter",
+                          "--out-dir", str(OUT_ROOT / "run_2ch_bad"),
+                          "--no-report", "--no-progress"],
+                         cwd=REPO, capture_output=True, text=True)
+    assert bad.returncode != 0 and "need 1- or 3-channel" in bad.stderr, \
+        "RGB-only augmentation accepted on a 2-channel file"
+    run(REPO / "evaluate.py", out_2ch, h5_2ch, "--split", "1",
+        "--out-dir", out_2ch / "eval", "--no-report", *GPU)
+    if importlib.util.find_spec("rasterio") is not None:
+        import rasterio
+        from rasterio.transform import from_origin
+        scene2 = OUT_ROOT / "scene_2band.tif"
+        bands = np.random.default_rng(3).integers(
+            0, 256, (2, 128, 128), dtype=np.uint8)
+        with rasterio.open(scene2, "w", driver="GTiff", height=128, width=128,
+                           count=2, dtype="uint8", crs="EPSG:3857",
+                           transform=from_origin(0, 100, 1, 1)) as dst:
+            dst.write(bands)
+        run(REPO / "inference.py", out_2ch, scene2, "--window-width", "64",
+            "--window-height", "64", "--stride-x", "64",
+            "--out-dir", OUT_ROOT / "inf_2ch", "--no-progress", *GPU)
+        assert (OUT_ROOT / "inf_2ch" / "detections.csv").exists()
+        assert list((OUT_ROOT / "inf_2ch").glob("report_*.pdf")), \
+            "multi-band inference report missing"
+
     # curate: snippet-removal GUI - self-test does a remove/save/restore
     # round-trip on a copy (removed mask honored by loaders, file left clean)
     h5_cur = OUT_ROOT / "curate_smoke.h5"

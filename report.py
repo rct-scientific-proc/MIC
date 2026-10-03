@@ -416,7 +416,8 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
     # ---- inference with the stored operating point (skipped when the
     # caller already ran it) -------------------------------------------------
     if probs is None or labels is None:
-        model = build_model(best["arch"], len(classes), pretrained=False).to(dev)
+        model = build_model(best["arch"], len(classes), pretrained=False,
+                            in_channels=best.get("in_channels", 3)).to(dev)
         model.load_state_dict(best["model_state"])
         ds = H5SnippetDataset(str(h5_path), split,
                               imagenet_norm=best["imagenet_norm"])

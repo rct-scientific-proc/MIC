@@ -37,7 +37,7 @@ from checkpoints import (atomic_save, checkpoint_name, find_checkpoint,
                          load_checkpoint, prune_role)
 from controller import SmartController
 from dataset import (AUGMENTATIONS, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
-                     load_augmentation_plugins, validate_h5)
+                     load_augmentation_plugins, model_channels, validate_h5)
 from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
@@ -731,7 +731,7 @@ def selection_key(op: dict) -> tuple:
 
 def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classes,
                     hn_index, op, best_key, miner=None, ramp_progress=0,
-                    controller=None, ema_model=None) -> None:
+                    controller=None, ema_model=None, in_channels=3) -> None:
     # model_state is always the DEPLOYED weights (the EMA twin when --ema is
     # on); raw_model_state keeps the underlying training weights for resume
     deploy = ema_model.module if ema_model is not None else model
@@ -745,6 +745,7 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
         "optimizer_state": optimizer.state_dict(),
         "scaler_state": scaler.state_dict(),
         "epoch": epoch,
+        "in_channels": in_channels,
         "config": vars(args),
         "classes": classes,
         "hard_negative_index": hn_index,
@@ -801,6 +802,11 @@ def train(args, on_epoch_end=None) -> dict:
     print(f"dataset: {args.h5}")
     for split_name, c in summary["counts"].items():
         print(f"  {split_name}: {c['genuine']} genuine, {c['hard_negative']} hard negatives")
+    in_channels = model_channels(summary["channels"])
+    print(f"  images: {summary['channels']}-channel {summary['dtype']} -> "
+          f"{in_channels}-channel model input"
+          + (" (first convolution rebuilt for this band count)"
+             if in_channels != 3 else ""))
 
     train_ds = H5SnippetDataset(args.h5, SPLIT_TRAIN,
                                 imagenet_norm=args.imagenet_norm,
@@ -830,7 +836,8 @@ def train(args, on_epoch_end=None) -> dict:
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, **loader_kw)
 
     model = build_model(args.arch, len(classes), pretrained=not args.no_pretrained,
-                        weights_path=args.weights_path).to(device)
+                        weights_path=args.weights_path,
+                        in_channels=in_channels).to(device)
     criterion = FocalLoss(len(classes), hn_index, gamma=args.focal_gamma,
                           hn_alpha=hn_alpha0).to(device)
     optimizer = build_optimizer(args, model)
@@ -979,7 +986,7 @@ def train(args, on_epoch_end=None) -> dict:
                        epoch=epoch, args=args, classes=classes,
                        hn_index=hn_index, op=op, miner=miner,
                        ramp_progress=ramp_progress, controller=controller,
-                       ema_model=ema_model)
+                       ema_model=ema_model, in_channels=in_channels)
         if controller is not None:
             improved_this_cycle = improved_this_cycle or improved
             if controller.observe(key):
@@ -1095,7 +1102,7 @@ def train(args, on_epoch_end=None) -> dict:
                             op=op_for_last, miner=miner,
                             ramp_progress=ramp_progress,
                             controller=controller, best_key=best_key,
-                            ema_model=ema_model)
+                            ema_model=ema_model, in_channels=in_channels)
             prune_role(out_dir, "last", last_path)
 
         if on_epoch_end is not None and on_epoch_end(epoch, op):
