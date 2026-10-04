@@ -7,11 +7,11 @@ triangle, ring (the ring makes a natural hard-negative foil for the
 circle) — drawn in a shared muted color with per-instance jitter, so a
 classifier must learn GEOMETRY, not color. RGB uint8, EPSG:3857
 georeferencing with a 0.01 m pixel and per-image origins laid out on a
-grid (same scale as the GeoLabelling example export). Written
+grid (same scale as the GeoLabeller example export). Written
 uncompressed/stripped so plain PIL readers (inference.py) open them too.
 
 A manifest.json records exactly what was drawn where. --gt-out
-additionally writes a ready-made ground-truth file in the GeoLabelling
+additionally writes a ready-made ground-truth file in the GeoLabeller
 export schema (every image gets an entry; empty images carry an empty
 labels list), with --rename mapping drawn shape names to the class names a
 model was trained with (e.g. --rename ring=torus).
@@ -72,7 +72,7 @@ def main() -> None:
                    help="rename a drawn shape in the manifest/gt output, "
                         "e.g. --rename ring=torus (repeatable)")
     p.add_argument("--gt-out", default=None, metavar="GT.json",
-                   help="also write a ground-truth file in the GeoLabelling "
+                   help="also write a ground-truth file in the GeoLabeller "
                         "export schema (every image gets an entry; empty "
                         "images carry an empty labels list)")
     p.add_argument("--seed", type=int, default=0)

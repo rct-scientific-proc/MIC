@@ -93,7 +93,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="convert images to grayscale before windowing (for "
                         "models trained on grayscale snippets); default RGB")
     p.add_argument("--gt", default=None, metavar="GT.json",
-                   help="ground-truth JSON (GeoLabelling export: images[] "
+                   help="ground-truth JSON (GeoLabeller export: images[] "
                         "with point labels carrying class_name and "
                         "normalized pixel_x/pixel_y). Entries are matched to "
                         "input images by filename; a point counts as HIT "
@@ -148,7 +148,7 @@ def gather_images(inputs, recursive: bool = False) -> list[Path]:
 
 
 def load_gt(path) -> dict[str, dict]:
-    """GeoLabelling export -> {lowercased image name/stem/basename: entry}.
+    """GeoLabeller export -> {lowercased image name/stem/basename: entry}.
 
     Entry paths are absolute paths from the labelling machine, so matching
     is by filename only. Each key maps to the raw image entry.

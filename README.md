@@ -165,7 +165,7 @@ stored thresholds, and writes `detections.csv` plus a
 (raw window boxes, colored per class) for each image containing
 non-hard-negative detections. `--grayscale` for models trained on grayscale
 snippets; `--stride-y` defaults to `--stride-x`. `--gt labels.json` scores
-detections against a GeoLabelling point-label export (matched by filename):
+detections against a GeoLabeller point-label export (matched by filename):
 a point is hit when a same-class accepted window contains it — adds
 `gt_results.csv`, green/red hit/miss markers on the overlay PNGs, and a
 GT report: a color-coded verdict box and per-class table on the cover, a
@@ -177,6 +177,15 @@ with mean/std, per-class ROC curves, and per-class snippet grids: top-N highest-
 GT windows rejected to hard_negative — borders triage the failure mode:
 green = correct and accepted, yellow = right class but under the
 threshold, red = wrong class. Whole-image overlays live in `assets/` as PNGs, not report pages.
+
+The ground-truth file is the JSON that
+[GeoLabeller](https://github.com/rct-scientific-proc/GeoLabeller) writes
+from Export → Ground Truth (all / labeled only); GeoLabeller's HDF5 export
+builds the training h5 from the same labels. The field-by-field format,
+coordinate conventions, filename matching, scoring rules, and a minimal
+hand-written example are in `docs/cli-reference.html` under "Ground-truth
+file format". `tests/make_geotiffs.py --gt-out` writes the same schema for
+generated scenes.
 
 ## Real public datasets
 

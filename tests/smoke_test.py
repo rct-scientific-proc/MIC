@@ -173,7 +173,7 @@ def main() -> None:
     Image.fromarray(scene).save(scenes / "scene.png")
     Image.fromarray(noisy(152, 400, 400)).save(scenes / "clean.png")
 
-    # ground truth in the GeoLabelling export schema: patch centres should
+    # ground truth in the GeoLabeller export schema: patch centres should
     # hit, a background point and an unknown class should not
     import json
     gt = {

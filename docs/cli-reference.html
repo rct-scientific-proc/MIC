@@ -1461,13 +1461,17 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
 
   <div class="arg" id="i-gt">
     <div class="arg-head"><span class="flag">--gt</span><span class="badge">path (.json)</span><span class="badge">default: none</span></div>
-    <p>Ground-truth JSON in the GeoLabelling export schema: an
+    <p>Ground-truth JSON in the GeoLabeller export schema: an
     <code>images[]</code> array whose entries carry point <code>labels</code>
     with <code>class_name</code> and normalized <code>pixel_x</code> /
     <code>pixel_y</code> (absolute-pixel exports are auto-detected and
     normalized via <code>original_width/height</code>). Entries are matched to
     input images by <strong>filename</strong> (name/stem/basename,
     case-insensitive) since export paths come from the labelling machine.</p>
+    <p>Field-by-field format, coordinate conventions, and the matching and
+    scoring rules, with a minimal hand-written example:
+    <a href="#gt-format">Ground-truth file format</a> at the end of this
+    section.</p>
     <p>Scoring: a point counts as <strong>HIT</strong> when an accepted window
     of the same class contains it; detections covering no same-class point
     count as false-positive windows. Points whose class the model doesn't
@@ -1586,6 +1590,126 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
   window, no merging — so a single object found by several windows shows
   several boxes. The CSV is the ground truth for post-processing; images with
   zero detections appear only in the summary table.</div>
+
+  <h3 id="gt-format">Ground-truth file format (GeoLabeller export)</h3>
+  <p>The file <code>--gt</code> reads is the ground-truth JSON that
+  <a href="https://github.com/rct-scientific-proc/GeoLabeller">GeoLabeller</a>
+  writes from its Export menu — <em>Ground Truth (all)</em> or
+  <em>Ground Truth (labeled only)</em>. It is the same document GeoLabeller
+  saves as a project (the labeled-only variant drops the images that carry no
+  labels), so a saved project <code>.json</code> works too. GeoLabeller's HDF5
+  export builds this pipeline's training h5 (<code>h5_format.md</code>) from the
+  same labels, so one labelling session yields both the training file and the
+  file that scores inference over the full scenes. The authoritative schema is
+  section 3, "Project File", of <code>docs/GeoLabeller-ICD.pdf</code> in that
+  repository; this section covers what MIC reads, what it ignores, and how a
+  hand-written or generated file must look.</p>
+
+  <p><strong>Minimal file.</strong> Everything MIC needs and nothing else — a
+  file like this scores exactly like a full export (the extra keys GeoLabeller
+  writes are listed in the tables below and may all be omitted):</p>
+  <pre><code>{
+  "version": "3.2",
+  "classes": ["circle", "square"],
+  "images": [
+    {
+      "path": "D:/survey/scene_0007.tif",
+      "name": "scene_0007",
+      "original_width": 2048,
+      "original_height": 2048,
+      "labels": [
+        {"id": 1, "class_name": "circle", "pixel_x": 0.3125, "pixel_y": 0.7041},
+        {"id": 2, "class_name": "square", "pixel_x": 0.8809, "pixel_y": 0.1230}
+      ]
+    },
+    {
+      "path": "D:/survey/scene_0008.tif",
+      "name": "scene_0008",
+      "original_width": 2048,
+      "original_height": 2048,
+      "labels": []
+    }
+  ]
+}</code></pre>
+
+  <p><strong>Top level.</strong></p>
+  <div class="table-wrap"><table>
+    <tr><th>field</th><th>type</th><th>GeoLabeller writes</th><th>MIC</th></tr>
+    <tr><td>images</td><td>array of object</td><td>one entry per image in the project (labeled-only export: only the images that carry labels)</td><td><strong>required</strong> — the only top-level key read</td></tr>
+    <tr><td>classes</td><td>array of string</td><td>ordered class list; every label's class appears in it</td><td>ignored — class names are checked label by label against the checkpoint</td></tr>
+    <tr><td>version</td><td>string</td><td>format version ("3.2" … "4.8"); later versions only add optional fields</td><td>ignored — coordinate units are auto-detected, see below</td></tr>
+    <tr><td>_next_id, _next_waypoint_id, waypoints, descriptions, mask_names, display_settings</td><td>—</td><td>id counters, geographic bookmarks, UI presets</td><td>ignored</td></tr>
+  </table></div>
+
+  <p><strong>Image entry</strong> (<code>images[]</code>).</p>
+  <div class="table-wrap"><table>
+    <tr><th>field</th><th>type</th><th>GeoLabeller writes</th><th>MIC</th></tr>
+    <tr><td>path</td><td>string</td><td>absolute path of the image on the labelling machine, separators normalised</td><td><strong>read</strong> — only the final filename component is used, for matching</td></tr>
+    <tr><td>name</td><td>string</td><td>display name; the filename stem by default</td><td><strong>read</strong> — a second match key</td></tr>
+    <tr><td>labels</td><td>array of object</td><td>the point labels on this image; empty for an unlabelled image</td><td><strong>required</strong> — an empty list is valid and useful (see Scoring)</td></tr>
+    <tr><td>original_width / original_height</td><td>number</td><td>pixel size of the source raster at full resolution</td><td>read only to normalise an absolute-pixel file; a fraction-coordinate file never needs them</td></tr>
+    <tr><td>group, reader, affine_coeffs, crs_epsg / crs_wkt, corners_wgs84, geodesic_width_m, geodesic_height_m, hard_negative_source, location</td><td>—</td><td>project group, raster reader, georeferencing, derived ground extents, hard-negative-source flag, location tag</td><td>ignored</td></tr>
+  </table></div>
+
+  <p><strong>Label</strong> (<code>images[].labels[]</code>).</p>
+  <div class="table-wrap"><table>
+    <tr><th>field</th><th>type</th><th>GeoLabeller writes</th><th>MIC</th></tr>
+    <tr><td>class_name</td><td>string</td><td>one of the project's classes</td><td><strong>required</strong> — must equal a genuine class name of the checkpoint exactly, case included</td></tr>
+    <tr><td>pixel_x / pixel_y</td><td>number</td><td>column / row of the point as a <em>fraction</em> of original_width / original_height (format 2.1 and later); absolute pixels only when either dimension is 0</td><td><strong>required</strong> — a label missing either is skipped</td></tr>
+    <tr><td>id</td><td>number</td><td>sequential id, unique within the project</td><td>read — copied into <code>gt_results.csv</code> so a row traces back to its label</td></tr>
+    <tr><td>unique_id, object_id, group_id, lon, lat, length_m, width_m, description, orientation_px_rad, orientation_deg, orientation_derived, confidence, review, attribution, masks</td><td>—</td><td>UUIDs, object linking, WGS84 position, measurements, orientation, QA fields, snippet masks</td><td>ignored</td></tr>
+  </table></div>
+
+  <p><strong>Coordinates.</strong> A point is the pixel the labeller clicked in
+  the <em>original, full-resolution</em> raster — not the reprojected view on
+  screen and not an overview level — stored as fractions: column ÷ width,
+  row ÷ height, origin at the top-left corner, so <code>(0.5, 0.5)</code> is
+  the centre of any image. MIC multiplies by the size of the scene it actually
+  reads, which is why the image handed to <code>inference.py</code> must be the
+  same pixel grid that was labelled: a resampled, cropped, or reprojected copy
+  shifts every point. A value above 1.5 on either axis marks the entry as
+  absolute pixels (GeoLabeller writes those only when it never learned the
+  image size); both axes are then divided by <code>original_width</code> /
+  <code>original_height</code>, falling back to the scene size when those are
+  missing or zero. Window containment is half-open: a point exactly on a
+  window's right or bottom edge belongs to the next window.</p>
+
+  <p><strong>Matching images to entries.</strong> Export paths are absolute
+  paths from the labelling machine, so directories are never compared. Each
+  entry is indexed under its lowercased <code>name</code>, the lowercased
+  filename of <code>path</code>, and that filename's stem; each input image is
+  looked up by its lowercased filename, then its stem — so
+  <code>scene_0007.tif</code> matches an entry whose path ends in
+  <code>Scene_0007.TIF</code> or whose name is <code>scene_0007</code>. The flip
+  side: two inputs with the same filename in different folders (easy to produce
+  with <code>--recursive</code>) can only match one entry, and the first in the
+  file wins silently — keep filenames unique across a scored set, or score the
+  folders in separate runs. The run's last line reports the match count
+  (<code>ground truth: N/M input images matched</code>); an input with no entry
+  is still classified but not scored, and entries for images that are not
+  among the inputs are ignored.</p>
+
+  <p><strong>Scoring rules.</strong> A point is HIT when an accepted window
+  (score s at or above the operating threshold — the class's own in per-class
+  mode) whose argmax class equals the label's class contains it; the best such
+  window's score is recorded. Every accepted window containing no point of its
+  own class is a false-positive window, so an entry with an empty labels list
+  contributes nothing but false positives — which is exactly why background
+  scenes belong in the file: export <em>Ground Truth (all)</em> when the
+  false-positives-per-image figures should reflect the survey as a whole; the
+  labeled-only export leaves background scenes unmatched and therefore
+  unscored. A label whose class is not one of the checkpoint's genuine
+  classes (<code>hard_negative</code> included) is printed in the run log as an
+  unknown class and excluded from the hit rate, so a class renamed between
+  labelling and training shows up as zero scored points rather than as
+  misses. Several labels on one object (sharing an <code>object_id</code>) are
+  scored as separate points.</p>
+
+  <p><strong>Without GeoLabeller.</strong> <code>tests/make_geotiffs.py
+  --gt-out gt.json</code> writes this schema for its generated scenes (every
+  image gets an entry, empty scenes an empty list), and any script can emit
+  the minimal file above — fractions in <code>[0, 1]</code>, class names that
+  match the checkpoint, one entry per scene filename.</p>
 </section>
 
 <section class="tool" id="gui">
@@ -1813,7 +1937,7 @@ float32   0.0 – 1.0    already-scaled floats — 4x the disk/IO of uint8</div>
   <code>inference.py</code> opens them directly. A
   <code>manifest.json</code> records every drawn shape and position for
   cross-checking labels, and <code>--gt-out</code> writes a ready-made
-  ground truth in the GeoLabelling export schema (every image gets an
+  ground truth in the <a href="#gt-format">GeoLabeller export schema</a> (every image gets an
   entry; empty images carry an empty labels list), with <code>--rename
   ring=torus</code>-style mappings to match a model's class names —
   skipping the manual labelling step entirely for scale tests. Intended
