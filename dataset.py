@@ -62,17 +62,48 @@ RGB_ONLY_AUGMENTATIONS = {"grayscale", "colorjitter", "sharpness",
                           "autocontrast", "randaugment"}
 
 
-def to_display_uint8(arr: np.ndarray) -> np.ndarray:
+# --display-channel: the band that thumbnails, previews, and overlays
+# render as a grayscale image - for data whose bands are not meant for the
+# eye (SAR I/Q or magnitude/phase pairs, multispectral stacks). None = the
+# default composite in to_display_uint8. Process-wide because every
+# display surface funnels through that one function.
+DISPLAY_CHANNEL: int | None = None
+
+
+def set_display_channel(index, channels: int | None = None) -> None:
+    """Pin the display band (0-based) for this process; validated against
+    the images' channel count when known. None restores the default."""
+    global DISPLAY_CHANNEL
+    if index is None:
+        DISPLAY_CHANNEL = None
+        return
+    index = int(index)
+    if index < 0 or (channels is not None and index >= channels):
+        raise ValueError(
+            f"--display-channel {index} is out of range for "
+            f"{channels}-channel images (0-based: the second channel is 1)")
+    DISPLAY_CHANNEL = index
+
+
+def to_display_uint8(arr: np.ndarray, channel: int | None = None) -> np.ndarray:
     """Storage dtype and channel count -> uint8 HWC with 1 or 3 channels
     for thumbnails and previews (curate GUI, report and inference grids,
-    overlays), regardless of how the file stores pixels: 2-band images
-    render as (band 0, band 1, their mean) false color, >3 bands show the
-    first three."""
+    overlays), regardless of how the file stores pixels. With a display
+    channel (the argument, else the process-wide --display-channel
+    setting) that single band comes back as a grayscale (H, W, 1) image;
+    otherwise 2-band images render as (band 0, band 1, their mean) false
+    color and >3 bands show the first three."""
     arr = np.asarray(arr)
     if arr.dtype == np.uint16:
         arr = (arr // 257).astype(np.uint8)
     elif arr.dtype != np.uint8:
         arr = (np.clip(arr.astype(np.float32), 0.0, 1.0) * 255.0).astype(np.uint8)
+    channel = DISPLAY_CHANNEL if channel is None else channel
+    if channel is not None and arr.ndim == 3:
+        if not 0 <= channel < arr.shape[-1]:
+            raise ValueError(f"display channel {channel} is out of range for "
+                             f"{arr.shape[-1]}-channel images")
+        return np.ascontiguousarray(arr[..., channel:channel + 1])
     if arr.ndim == 3 and arr.shape[-1] == 2:
         mean = ((arr[..., :1].astype(np.uint16) + arr[..., 1:2]) // 2).astype(np.uint8)
         arr = np.concatenate([arr, mean], axis=-1)

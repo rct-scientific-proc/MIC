@@ -37,7 +37,8 @@ from checkpoints import (atomic_save, checkpoint_name, find_checkpoint,
                          load_checkpoint, prune_role)
 from controller import SmartController
 from dataset import (AUGMENTATIONS, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
-                     load_augmentation_plugins, model_channels, validate_h5)
+                     load_augmentation_plugins, model_channels,
+                     set_display_channel, validate_h5)
 from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
@@ -362,6 +363,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "See example_augment_plugin.py")
     d.add_argument("--imagenet-norm", action="store_true",
                    help="ImageNet mean/std normalization (default: just /255)")
+    d.add_argument("--display-channel", type=int, default=None, metavar="C",
+                   help="0-based band that report thumbnails render as a "
+                        "grayscale image (the second channel is 1) - for "
+                        "data whose bands are not meant for the eye, e.g. "
+                        "SAR I/Q pairs. Default: RGB as-is, 2-band files as "
+                        "(band 0, band 1, mean) false color, >3 bands the "
+                        "first three. Stored in checkpoints, so evaluate "
+                        "and inference reports use it too")
     d.add_argument("--augment", nargs="+", default=None,
                    metavar="NAME[:k=v,...]",
                    help="training-split augmentations, applied in the order "
@@ -746,6 +755,7 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
         "scaler_state": scaler.state_dict(),
         "epoch": epoch,
         "in_channels": in_channels,
+        "display_channel": args.display_channel,
         "config": vars(args),
         "classes": classes,
         "hard_negative_index": hn_index,
@@ -803,6 +813,7 @@ def train(args, on_epoch_end=None) -> dict:
     for split_name, c in summary["counts"].items():
         print(f"  {split_name}: {c['genuine']} genuine, {c['hard_negative']} hard negatives")
     in_channels = model_channels(summary["channels"])
+    set_display_channel(args.display_channel, summary["channels"])  # fail early
     print(f"  images: {summary['channels']}-channel {summary['dtype']} -> "
           f"{in_channels}-channel model input"
           + (" (first convolution rebuilt for this band count)"

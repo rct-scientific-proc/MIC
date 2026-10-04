@@ -1139,6 +1139,23 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
     never silently diverge.</div>
   </div>
 
+  <div class="arg" id="t-display-channel">
+    <div class="arg-head"><span class="flag">--display-channel</span><span class="badge">int · 0-based band</span><span class="badge">default: none (composite)</span></div>
+    <p>Which band every thumbnail, preview, and overlay renders as a
+    <strong>grayscale image</strong> — for data whose bands are not meant
+    for the eye: SAR I/Q or magnitude/phase pairs, multispectral stacks.
+    Pass the band that reads as "the picture" (0-based, so the second
+    channel is <code>1</code>) and the report's per-class sample pages, the
+    miner grid, and inference's snippet grids and overlays all show that
+    band alone instead of the default composite (RGB as-is; 2-band files as
+    (band 0, band 1, mean) false color; the first three bands of larger
+    stacks). Purely cosmetic — the model always sees every band. Validated
+    against the file's channel count before training starts, stored in the
+    checkpoint, and replayed by <code>report.py</code> regeneration and by
+    <code>inference.py</code> (which can override it per run). Works on
+    plain RGB files too, e.g. <code>2</code> shows the blue band.</p>
+  </div>
+
   <div class="arg" id="t-augment">
     <div class="arg-head"><span class="flag">--augment</span><span class="badge">one or more specs</span><span class="badge">default: none</span></div>
     <p>Training-split augmentations, applied in the order given. Validation,
@@ -1532,6 +1549,14 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
     scenes are read band-for-band.</p>
   </div>
 
+  <div class="arg" id="i-display-channel">
+    <div class="arg-head"><span class="flag">--display-channel</span><span class="badge">int · 0-based band</span><span class="badge">default: the checkpoint's</span></div>
+    <p>Band rendered as the grayscale image in the report's snippet grids
+    and overlay PNGs, overriding the <code>--display-channel</code> stored in
+    the checkpoint at training time (see train.py). Cosmetic only; validated
+    against the scene's band count (1 with <code>--grayscale</code>).</p>
+  </div>
+
   <div class="arg" id="i-batch">
     <div class="arg-head"><span class="flag">--batch-size</span><span class="badge">int</span><span class="badge">default: 64</span></div>
     <p>Windows per forward pass. Pure throughput knob — the whole batch of raw
@@ -1630,6 +1655,10 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
   datasets filtered together, no <code>removed</code> dataset in the
   output); a plain optimize pass without the flag carries the mask over
   unchanged, so optimizing never loses curation.</p>
+  <p><code>--display-channel C</code> shows one band (0-based) as a grayscale
+  image instead of the default composite — the same option as train.py's,
+  for files whose bands are not meant for the eye; validated against the
+  file's channel count.</p>
   <p><code>--self-test DIR</code> runs an offscreen remove/save/restore
   round-trip against the given h5 (left clean) with screenshots — the
   smoke suite exercises it on a copy of its dataset whenever PyQt5 is
@@ -1762,7 +1791,9 @@ float32   0.0 – 1.0    already-scaled floats — 4x the disk/IO of uint8</div>
   (<code>grayscale, colorjitter, sharpness, autocontrast, randaugment</code>)
   are refused at startup with the channel-agnostic alternatives named, and
   thumbnails render 2-band images as (band 0, band 1, their mean) false
-  color and show the first three bands of larger stacks. The curate GUI and all
+  color and show the first three bands of larger stacks — or, when the
+  bands are not meant for viewing, <code>--display-channel</code> pins one
+  band as the grayscale picture across every display surface. The curate GUI and all
   report thumbnails display every dtype correctly, and
   <code>optimize_h5.py</code> preserves the source dtype, including through
   <code>--resize</code>. Prefer uint8 unless the data genuinely holds more

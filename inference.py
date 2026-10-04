@@ -39,7 +39,8 @@ from torchmetrics.functional.classification import binary_auroc, binary_roc
 from tqdm import tqdm
 
 from checkpoints import find_checkpoint, load_checkpoint, utc_stamp
-from dataset import build_transform, to_display_uint8, to_model_input
+from dataset import (build_transform, set_display_channel, to_display_uint8,
+                     to_model_input)
 from metrics import _per_sample_thresholds, genuineness_scores, non_hn_argmax
 from model import build_model
 from plots import (SERIES, plot_confusion_grid, plot_per_class_rocs,
@@ -83,6 +84,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "default; scores can differ by ~1e-3 from fp32, which "
                         "only matters for windows sitting exactly at a "
                         "threshold)")
+    p.add_argument("--display-channel", type=int, default=None, metavar="C",
+                   help="0-based band rendered as the grayscale image in the "
+                        "report's snippet grids and overlays (default: the "
+                        "checkpoint's stored --display-channel, else RGB / "
+                        "false color)")
     p.add_argument("--grayscale", action="store_true",
                    help="convert images to grayscale before windowing (for "
                         "models trained on grayscale snippets); default RGB")
@@ -1016,6 +1022,12 @@ def main(argv=None) -> None:
     if args.grayscale and in_channels != 3:
         raise SystemExit("--grayscale applies to 3-channel models; this "
                          f"checkpoint takes {in_channels}-band input")
+    display_channel = (args.display_channel if args.display_channel is not None
+                       else ckpt.get("display_channel"))
+    try:
+        set_display_channel(display_channel, 1 if args.grayscale else in_channels)
+    except ValueError as e:
+        raise SystemExit(str(e))
     model = build_model(ckpt["arch"], len(classes), pretrained=False,
                         in_channels=in_channels).to(device)
     model.load_state_dict(ckpt["model_state"])

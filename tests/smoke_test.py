@@ -346,11 +346,15 @@ def main() -> None:
     run(REPO / "train.py", h5_2ch, "--arch", "resnet18", "--no-pretrained",
         "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
         "--augment", "rotation:p=0.5,degrees=10", "gaussianblur",
+        "--display-channel", "1",
         "--out-dir", out_2ch, "--no-report", "--patience", "0",
         "--seed", "1", "--no-progress", *GPU_TRAIN)
     ck_2ch = torch.load(ck(out_2ch, "best"), map_location="cpu",
                         weights_only=False)
     assert ck_2ch["in_channels"] == 2, ck_2ch.get("in_channels")
+    assert ck_2ch["display_channel"] == 1, ck_2ch.get("display_channel")
+    from dataset import to_display_uint8
+    assert to_display_uint8(np.zeros((4, 4, 2), np.uint8), channel=1).shape == (4, 4, 1)
     assert tuple(ck_2ch["model_state"]["conv1.weight"].shape) == (64, 2, 7, 7)
     bad = subprocess.run([sys.executable, str(REPO / "train.py"), str(h5_2ch),
                           "--epochs", "1", "--augment", "colorjitter",

@@ -26,7 +26,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from dataset import SPLIT_NAMES, to_display_uint8, validate_h5
+from dataset import SPLIT_NAMES, set_display_channel, to_display_uint8, validate_h5
 
 REPO = Path(__file__).resolve().parent
 INSTALL_HINT = "the curator needs PyQt5 - to run it: pip install PyQt5"
@@ -53,11 +53,12 @@ if QtWidgets is not None:
             QtCore.Qt.SmoothTransformation)
 
     class Curator(QtWidgets.QMainWindow):
-        def __init__(self, h5_path: str):
+        def __init__(self, h5_path: str, display_channel=None):
             super().__init__()
             self.h5_path = str(h5_path)
             validate_h5(self.h5_path)
             with h5py.File(self.h5_path, "r") as f:
+                set_display_channel(display_channel, int(f["images"].shape[3]))
                 self.classes = list(f["classes"].asstr()[:])
                 self.labels = f["labels"][:].astype(np.int64)
                 self.split = f["split"][:].astype(np.int64)
@@ -338,6 +339,10 @@ def _self_test(win, out_dir: Path) -> None:
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("h5", help="dataset .h5 file (h5_format.md)")
+    ap.add_argument("--display-channel", type=int, default=None, metavar="C",
+                    help="0-based band shown as a grayscale image (the second "
+                         "channel is 1) - for bands not meant for the eye; "
+                         "default: RGB as-is, 2-band files as false color")
     ap.add_argument("--self-test", metavar="DIR", default=None,
                     help="render offscreen, run a remove/save/restore "
                          "round-trip on the given h5 (left clean), save "
@@ -349,7 +354,10 @@ def main(argv=None) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QtWidgets.QApplication(sys.argv[:1])
     app.setStyle("Fusion")
-    win = Curator(args.h5)
+    try:
+        win = Curator(args.h5, display_channel=args.display_channel)
+    except ValueError as e:
+        raise SystemExit(str(e))
     win.show()
     if args.self_test is not None:
         _self_test(win, Path(args.self_test))
