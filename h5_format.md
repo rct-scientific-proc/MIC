@@ -10,7 +10,7 @@ index mapping across all datasets.
 
 | Name      | dtype   | Shape        | Description |
 |-----------|---------|--------------|-------------|
-| `images`  | see below | (N, H, W, C) | Pixel values. `C=1` for grayscale (expanded to 3 channels at model input), `C=3` for RGB. Allowed dtypes and ranges in the table below. |
+| `images`  | see below | (N, H, W, C) | Pixel values, any `C >= 1`. `C=1` grayscale is replicated to 3 channels at the model input; `C=3` is native RGB; any other count (2-band SAR, 4+-band multispectral) rebuilds the backbone's first convolution for that many bands, initialized from the pretrained RGB kernel (tiled and scaled by 3/C). The count is stored in checkpoints as `in_channels`; inference reads multi-band scenes natively via rasterio. Allowed dtypes and ranges in the table below. |
 | `labels`  | uint16  | (N,)         | Integer class index. Look up the name via `classes[labels[i]]`. |
 | `gt`      | bool    | (N,)         | `True` = genuine example. `False` = hard negative. |
 | `split`   | uint8   | (N,)         | `0` = train, `1` = validate, `2` = test. |
