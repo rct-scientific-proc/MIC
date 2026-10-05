@@ -238,7 +238,9 @@ python tests/smoke_test.py
 
 Generates a small synthetic dataset (`tests/make_synthetic_h5.py`, which also
 serves as an h5-format example), trains, resumes, and evaluates through the
-real CLIs.
+real CLIs. About three and a half minutes on a desktop GPU: the main legs
+train 64 px snippets at native size, and each command's duration is
+printed as it completes.
 
 ## Notes / gotchas
 

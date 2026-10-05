@@ -18,6 +18,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import torch
@@ -33,10 +34,15 @@ GPU = ["--device", "cuda"] if torch.cuda.is_available() else []
 GPU_TRAIN = GPU + (["--amp"] if GPU else [])
 
 
+T0 = time.time()
+
+
 def run(*argv) -> None:
     cmd = [sys.executable, *map(str, argv)]
     print("::", " ".join(cmd[1:]))
+    t = time.time()
     subprocess.run(cmd, cwd=REPO, check=True)
+    print(f"   ({time.time() - t:.1f}s, {time.time() - T0:.0f}s elapsed)")
 
 
 def ck(run_dir: Path, role: str) -> Path:
@@ -55,11 +61,17 @@ def main() -> None:
     h5 = OUT_ROOT / "smoke.h5"
     out = OUT_ROOT / "run"
 
+    # 64 px snippets trained at native size (no resize, ~3x less compute
+    # than the 224 default - the default resize path is covered by the
+    # uint16 and optimize legs) and a 10x hard-negative pool: validation
+    # runs every epoch, so the validation split's size is the per-epoch
+    # cost that matters, and the 3.0 ratio cap still subsamples training
     make_dataset(str(h5), num_genuine_classes=5, genuine_per_class=30,
-                 hn_factor=25.0, seed=0, channels=3, image_hw=(128, 128))
+                 hn_factor=10.0, seed=0, channels=3, image_hw=(64, 64))
 
     common = [
         REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+        "--input-size", "native",
         "--batch-size", "32", "--target-recall", "0.98",
         "--imbalance-ratio", "3.0", "--imbalance-ratio-start", "1.0",
         "--ramp-epochs", "2", "--hn-alpha", "0.25", "--hn-alpha-end", "1.0",
@@ -76,14 +88,14 @@ def main() -> None:
         assert (out / name).exists(), f"missing {out / name}"
     print("checkpoints:", ck(out, "best").name, "/", ck(out, "last").name)
 
-    # resume and train long enough for BN stats to settle and the model to
-    # learn (random init needs ~15 epochs on this data); workers=0 is much
-    # faster at this size. Passing the run DIRECTORY exercises checkpoint
-    # discovery (newest last_*).
-    run(*common, "--epochs", "40", "--workers", "0", "--resume", out,
+    # resume and train long enough for the model to learn (the
+    # prior-initialised head settles in a few epochs from random init);
+    # workers=0 is much faster at this size. Passing the run DIRECTORY
+    # exercises checkpoint discovery (newest last_*).
+    run(*common, "--epochs", "20", "--workers", "0", "--resume", out,
         "--save-every", "5")
     assert not list(out.glob("*.tmp")), "temp checkpoint left behind"
-    assert ck(out, "last").name.startswith("last_e0039"), \
+    assert ck(out, "last").name.startswith("last_e0019"), \
         "final epoch must always write the last checkpoint"
 
     # evaluate also accepts the run directory (newest best_*)
@@ -103,7 +115,7 @@ def main() -> None:
     assert (out / "config.json").exists(), "missing resolved config.json"
     out_cfg = OUT_ROOT / "run_config"
     run(REPO / "train.py", "--config", out / "config.json",
-        "--out-dir", out_cfg, "--epochs", "41", "--resume", out,
+        "--out-dir", out_cfg, "--epochs", "21", "--resume", out,
         "--no-report")
     assert (out_cfg / "metrics.csv").exists()
     assert (out_cfg / "config.json").exists()
@@ -112,10 +124,11 @@ def main() -> None:
     # trained weights (resume restores the epoch counter, so extend past it)
     out_pc = OUT_ROOT / "run_per_class"
     run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+        "--input-size", "native",
         "--batch-size", "32", "--target-recall", "0.98",
         "--threshold-mode", "per-class", "--per-class-min-count", "5",
         "--min-threshold", "0.05", "--out-dir", out_pc, "--patience", "0",
-        "--seed", "1", "--epochs", "43", "--workers", "0", *GPU_TRAIN,
+        "--seed", "1", "--epochs", "23", "--workers", "0", *GPU_TRAIN,
         "--resume", out)
     assert (out_pc / "class_thresholds.csv").exists()
 
@@ -128,13 +141,14 @@ def main() -> None:
     # target is reachable and raise/milestone events actually fire
     out_sm = OUT_ROOT / "run_smart"
     run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+        "--input-size", "native",
         "--batch-size", "32", "--target-recall", "0.95",
         "--smart", "--lr-cycle-epochs", "3", "--pressure-step", "0.5",
         "--rescue", "--rescue-ema", "0.3",
         "--imbalance-ratio", "3.0", "--imbalance-ratio-start", "1.0",
         "--hn-alpha", "0.25", "--hn-alpha-end", "1.0",
         "--out-dir", out_sm, "--patience", "0", "--seed", "1",
-        "--epochs", "52", "--workers", "0", *GPU_TRAIN,
+        "--epochs", "32", "--workers", "0", *GPU_TRAIN,
         "--resume", out)
     for name in ("cycle_best.pt", "metrics.csv"):
         assert (out_sm / name).exists(), f"missing smart output {name}"
@@ -196,6 +210,8 @@ def main() -> None:
     gt_path = OUT_ROOT / "gt.json"
     gt_path.write_text(json.dumps(gt))
 
+    # 128 px windows on a 64 px model: the on-device resize path (each
+    # planted patch is 128 px, so a window inside it is still one band)
     out_inf = OUT_ROOT / "inference"
     run(REPO / "inference.py", out_sm, scenes, "--window-width", "128",
         "--window-height", "128", "--stride-x", "64", "--gt", gt_path,
@@ -233,6 +249,7 @@ def main() -> None:
     if importlib.util.find_spec("optuna") is not None:
         out_hp = OUT_ROOT / "run_optuna"
         run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+            "--input-size", "native",
             "--batch-size", "32", "--target-recall", "0.5", "--epochs", "2",
             "--out-dir", out_hp, "--optuna", "2", "--optuna-prune-warmup", "0",
             "--patience", "0", "--seed", "1", "--no-progress", *GPU_TRAIN)
@@ -259,6 +276,7 @@ def main() -> None:
         }), encoding="utf-8")
         out_pin = OUT_ROOT / "run_optuna_pin"
         run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+            "--input-size", "native",
             "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
             "--out-dir", out_pin, "--optuna", "1", "--optuna-space", space,
             "--patience", "0", "--seed", "1", "--no-progress", *GPU_TRAIN)
@@ -278,6 +296,7 @@ def main() -> None:
     # custom augmentations shipped as a plugin file: the example plugin's
     # entries (incl. a post-resize one) must train an epoch end to end
     run(REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
+        "--input-size", "native",
         "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
         "--out-dir", OUT_ROOT / "run_plugin", "--no-report", "--patience",
         "0", "--class-alpha-auto", "0.99", "--ema",
@@ -321,13 +340,13 @@ def main() -> None:
     # and the dataset built for it carries no resize op
     ck_f32 = torch.load(ck(OUT_ROOT / "run_f32", "best"), map_location="cpu",
                         weights_only=False)
-    assert ck_f32["input_size"] == [128, 128], ck_f32.get("input_size")
+    assert ck_f32["input_size"] == [64, 64], ck_f32.get("input_size")
     from dataset import H5SnippetDataset as _DS
     from torchvision.transforms import v2 as _v2
     _ds = _DS(str(h5_f32), 0, input_size=ck_f32["input_size"])
     assert not any(isinstance(t, _v2.Resize) for t in _ds.transform.transforms), \
         "native input size still resizes"
-    assert tuple(_ds[0][0].shape) == (3, 128, 128), _ds[0][0].shape
+    assert tuple(_ds[0][0].shape) == (3, 64, 64), _ds[0][0].shape
     bad = subprocess.run([sys.executable, str(REPO / "train.py"), str(h5_f32),
                           "--epochs", "1", "--input-size", "16",
                           "--out-dir", str(OUT_ROOT / "run_f32_bad"),
@@ -428,7 +447,7 @@ def main() -> None:
         print("PyQt5 not installed - gui install hint verified")
 
     print(f"\noutputs kept in {OUT_ROOT}")
-    print("SMOKE TEST PASSED")
+    print(f"SMOKE TEST PASSED in {time.time() - T0:.0f}s")
 
 
 if __name__ == "__main__":
