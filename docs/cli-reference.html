@@ -2487,6 +2487,158 @@ python train.py --config runs/hard_search/trial_NNN/config.json ^
   <code>optimize_h5.py --sort-split</code> first so the every-epoch validation
   pass streams instead of seeking.</p>
 
+  <h3>Extreme imbalance: a few hundred positives against millions of negatives</h3>
+  <pre><code>python train.py data.h5 --arch resnet18 --amp --workers 4 ^
+    --input-size native --freeze-epochs 3 --ema ^
+    --smart 5 --recall-first 5 ^
+    --target-recall 0.95 --recall-agg harmonic ^
+    --threshold-mode per-class --per-class-min-count 15 --min-threshold 0.1 ^
+    --class-alpha-auto 0.9999 ^
+    --focal-gamma 1 --hn-gamma 4 --hn-margin 0.1 ^
+    --imbalance-ratio 8.0 --hn-alpha-end 1.0 --mining-random-frac 0.3 ^
+    --augment rotation:p=0.8,degrees=180 gaussianblur erasing:p=0.3,scale=0.02-0.1 ^
+    --crt-epochs 8 --mined-export 2000 --save-every 5 ^
+    --out-dir runs/extreme1</code></pre>
+  <p class="syn">The regime where the positive set would fit on one screen and
+  the negatives would not fit in RAM. The run is sized by the positives,
+  not the negatives:</p>
+  <ul>
+    <li><code>--arch resnet18 --input-size native --freeze-epochs 3</code>:
+    a few hundred positives cannot feed a wider network, and the small one
+    at native size runs ~3× faster per epoch, which the marathon preset
+    spends on more cycles rather than bigger ones. Three head-only epochs
+    let the prior-initialised head settle on frozen ImageNet features before
+    the imbalanced gradients reach them.</li>
+    <li><code>--smart 5 --recall-first 5</code>: the longest horizon, opening
+    with hard negatives almost silent (<code>hn-alpha</code> 0.01, ratio 1.0)
+    and earning pressure only at troughs where the recall target holds.
+    <code>--save-every 5</code> because a run this long on slow storage would
+    otherwise write a multi-hundred-MB checkpoint every epoch.</li>
+    <li><code>--imbalance-ratio 8.0 --mining-random-frac 0.3</code>: at full
+    pressure each epoch draws eight mined negatives per positive. The budget
+    scales with the positive count, not the negative sea, so an epoch stays
+    minutes long however many millions of negatives exist; the larger random
+    share keeps the miner from fixating on stale scores in a pool it can
+    only ever sample a sliver of.</li>
+    <li><code>--class-alpha-auto 0.9999</code>: a beta nearer 1 keeps the
+    effective-number weighting close to inverse frequency, which is what a
+    few dozen positives per class call for.</li>
+    <li><code>--per-class-min-count 15 --min-threshold 0.1</code>: the
+    per-class validation partitions are tiny, so a lower count keeps most
+    classes on their own threshold instead of the global fallback, and the
+    floor keeps an unreachable target from collapsing the operating point to
+    "accept everything".</li>
+    <li><code>--focal-gamma 1 --hn-gamma 4 --hn-margin 0.1</code>: gentle on
+    positives, hard on the mass of easy negatives, and negatives already
+    rejected with genuineness ≤ 0.1 drop out of the loss.</li>
+    <li><code>rotation:p=0.8,degrees=180</code>: overhead imagery has no
+    canonical orientation, so full rotations multiply the few positives for
+    free; use 15–20° for imagery with a fixed "up".</li>
+    <li><code>--crt-epochs 8 --mined-export 2000</code>: re-fit the head on a
+    balanced draw at the end, and export a longer audit list because the
+    negative pool is large (see the next recipe).</li>
+  </ul>
+  <p class="syn"><strong>Reading it:</strong> with few validation positives,
+  recall moves in steps of one sample, so a single epoch's operating point
+  is noisy. Judge candidates by specificity at the target recall across the
+  top checkpoints the smart run keeps (<code>--keep-top-k</code>) and by the
+  report's per-class pages, not by one epoch's line.</p>
+
+  <h3>Negatives that hide unlabelled targets (the audit loop)</h3>
+  <pre><code># 1. surface the hardest negatives with a short native-size run
+python train.py data.h5 --arch resnet18 --amp --input-size native --epochs 30 ^
+    --imbalance-ratio 4.0 --focal-gamma 1 --hn-gamma 4 ^
+    --mined-export 1000 --out-dir runs/audit1
+# 2. review them: real targets go back to GeoLabeller for labelling, junk is removed here
+python curate.py data.h5 --rows runs/audit1/mined_hard_negatives.csv
+# 3. repeat until the top of the list is genuinely background, then the full run
+python train.py data.h5 --arch resnet34 --amp --input-size 128 --freeze-epochs 2 --ema ^
+    --smart 4 --recall-first 4 --class-alpha-auto ^
+    --focal-gamma 1 --hn-gamma 4 --hn-margin 0.1 --imbalance-ratio 4.0 --hn-alpha-end 1.0 ^
+    --threshold-mode per-class --crt-epochs 5 --out-dir runs/clean1</code></pre>
+  <p class="syn">Survey labels are never complete, and the miner is the one
+  component that cannot tell a confusing background from a target the
+  labeller missed: it draws whatever stays hardest, so unlabelled targets
+  get the most training effort — as hard negatives. A model trained that way
+  learns to reject exactly what you are looking for, and no loss setting
+  fixes it (<code>--hn-margin</code> drops <em>easy</em> negatives, not wrong
+  ones). The list makes the problem visible: the review view shows the
+  negatives in difficulty order, captioned with class, split and difficulty;
+  a difficulty that stays near 1 means the model is sure it is looking at a
+  target. Removal in the curator only drops rows; a negative that <em>is</em>
+  a target needs a label in GeoLabeller and a re-exported h5. While the
+  labels are still suspect, <code>--mining-random-frac 0.5</code> (or
+  <code>--no-mining</code>) blunts the effect; once the top of the list is
+  honest background, the full run can trust the miner again.</p>
+
+  <h3>Plain cross-entropy with logit adjustment (the alternative objective)</h3>
+  <pre><code>python train.py data.h5 --arch resnet34 --amp --input-size 128 --ema ^
+    --focal-gamma 0 --hn-alpha 1 --logit-adjust 1 ^
+    --imbalance-ratio 4.0 --imbalance-ratio-start 1.0 --ramp-epochs 10 ^
+    --target-recall 0.95 --recall-agg harmonic --threshold-mode per-class ^
+    --lr-schedule cosine --warmup-epochs 2 --epochs 80 --patience 15 ^
+    --crt-epochs 5 --out-dir runs/la1</code></pre>
+  <p class="syn">The same skew handled by prior correction instead of
+  re-weighting. <code>--focal-gamma 0 --hn-alpha 1</code> is plain
+  cross-entropy; <code>--logit-adjust 1</code> adds <code>log(prior)</code> of
+  each epoch's draw to the training logits, so the raw output learns the
+  balanced posterior — and because the prior is recomputed per epoch, the
+  ratio ramp (1.0 → 4.0 over ten steps, alpha held at 1) is tracked exactly.
+  Alpha re-weighting bends probabilities away from posteriors, which the
+  threshold sweep tolerates but the calibration page shows; the adjusted
+  model keeps them posterior-like, which is why its validation thresholds
+  tend to transfer better when the deployment prior differs from the draw.
+  Run it against the focal recipe on the same split and compare specificity
+  at the target recall: these are alternatives, not a stack, and the better
+  one depends on the data. The sampler, mining, EMA, per-class thresholds and
+  the re-training tail all work the same under either loss.</p>
+
+  <h3>Non-RGB bands at native resolution (SAR, multispectral)</h3>
+  <pre><code>python train.py sar.h5 --arch resnet34 --amp --input-size native --display-channel 1 ^
+    --freeze-epochs 2 --ema --class-alpha-auto ^
+    --augment rotation:p=0.5,degrees=15 gaussianblur:p=0.3 erasing:p=0.3 ^
+    --smart 4 --recall-first 3 --focal-gamma 1 --hn-gamma 4 ^
+    --threshold-mode per-class --out-dir runs/sar1</code></pre>
+  <p class="syn">A 2-band (I/Q, magnitude/phase) or 4+-band file. The stem's
+  first convolution is rebuilt for the band count from the ImageNet kernel
+  (tiled and rescaled), so pretrained features still apply, and
+  <code>--freeze-epochs 2</code> lets the head settle before that adapted
+  stem is perturbed. No <code>--imagenet-norm</code>: RGB channel statistics
+  mean nothing here. The RGB-only augmentations (colorjitter, grayscale,
+  sharpness, autocontrast, randaugment) are refused on such files; the
+  geometric subset above runs on any band count, and
+  <code>example_augment_plugin.py</code>'s <code>gaussnoise</code> and
+  <code>coldrop</code> are templates for speckle and column dropout.
+  <code>--display-channel 1</code> makes every thumbnail, grid and overlay
+  render the band meant for the eye. Float32 storage must already be in
+  [0, 1] (<code>h5_format.md</code>). Evaluation and inference replay the
+  band count and input size from the checkpoint; inference reads multi-band
+  GeoTIFFs through rasterio and refuses a band-count mismatch up front.</p>
+
+  <h3>Iterate fast, then commit</h3>
+  <pre><code># minutes each: same data, same split, one thing different, at native size
+python train.py data.h5 --arch resnet18 --amp --input-size native --epochs 25 --patience 0 ^
+    --ema --imbalance-ratio 4.0 --focal-gamma 1 --hn-gamma 4 --hn-margin 0.1 --out-dir runs/q_asym
+python train.py data.h5 --arch resnet18 --amp --input-size native --epochs 25 --patience 0 ^
+    --ema --imbalance-ratio 4.0 --focal-gamma 0 --hn-alpha 1 --logit-adjust 1 --out-dir runs/q_la
+python evaluate.py runs/q_asym data.h5 --split 1 --no-report
+python evaluate.py runs/q_la data.h5 --split 1 --no-report
+# promote the winner: its config.json pins the loss; CLI flags override the rest
+python train.py --config runs/q_asym/config.json --arch resnet34 --input-size 128 ^
+    --smart 4 --recall-first 4 --epochs 150 --patience 8 --crt-epochs 5 --out-dir runs/final1</code></pre>
+  <p class="syn">On 64 px snippets a resnet18 epoch at native size takes about
+  a second per thousand samples on a desktop GPU, so a 25-epoch comparison
+  costs a coffee. Hold everything but the question fixed — the loss here;
+  never the input size or the architecture at the same time — and read the
+  two <code>report.txt</code> files side by side: specificity at the target
+  recall on the <em>validation</em> split is the number, and the test split
+  stays untouched until the final model. The quick run's
+  <code>config.json</code> is itself a valid <code>--config</code>; explicit
+  flags override it, so the long run inherits the loss and sampler settings
+  and changes only scale and horizon. Flags that are switches
+  (<code>--no-report</code>, <code>--no-pretrained</code>) cannot be undone
+  from the command line, so leave them out of the quick runs.</p>
+
   <h3>Offline machine</h3>
   <pre><code># connected box
 python download_weights.py --out-dir pretrained
