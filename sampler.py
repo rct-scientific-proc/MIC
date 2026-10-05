@@ -85,6 +85,7 @@ class ImbalanceCapSampler(Sampler[int]):
             raise ValueError(f"random_frac must be in [0, 1], got {random_frac}")
 
         self.labels = np.asarray(labels)
+        self.hard_negative_index = hard_negative_index
         self.genuine_pos = np.flatnonzero(labels != hard_negative_index)
         self.hn_pos = np.flatnonzero(labels == hard_negative_index)
         if len(self.genuine_pos) == 0:
@@ -163,3 +164,15 @@ class ImbalanceCapSampler(Sampler[int]):
 
     def __len__(self) -> int:
         return len(self._genuine_epoch_positions()) + self.hn_budget
+
+    def epoch_class_counts(self, num_classes: int) -> np.ndarray:
+        """How many samples of each class one epoch draws under the current
+        ratio and rescue repeats: the genuine counts (times their repeat
+        factors) and the hard-negative budget. This is the class prior the
+        model is actually trained under - what the classifier bias is
+        initialised to (train.py prior init) and what logit adjustment
+        corrects for."""
+        counts = np.bincount(self.labels[self._genuine_epoch_positions()],
+                             minlength=num_classes).astype(np.float64)
+        counts[self.hard_negative_index] = self.hn_budget
+        return counts

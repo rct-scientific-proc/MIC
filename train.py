@@ -42,7 +42,7 @@ from dataset import (AUGMENTATIONS, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
 from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
-from model import ARCHS, build_model
+from model import ARCHS, build_model, init_classifier_prior
 from sampler import HardNegativeMiner, ImbalanceCapSampler
 
 # --smart level presets: 1 = minimal/fast, 5 = marathon (slowly reach the
@@ -135,6 +135,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="random init instead of ImageNet weights")
     m.add_argument("--weights-path", default=None,
                    help="local ImageNet .pth (from download_weights.py) for offline use")
+    m.add_argument("--no-prior-init", action="store_true",
+                   help="start the classifier head from a uniform prediction "
+                        "instead of the training-time class prior. By "
+                        "default the head's bias is set to log(prior) of the "
+                        "first epoch's draw (genuine counts and the "
+                        "hard-negative budget), the focal-loss paper's "
+                        "initialisation: the untrained network already "
+                        "predicts the class frequencies, so the first epochs "
+                        "are not spent learning them with recall at chance")
     m.add_argument("--input-size", default=None, metavar="N|HxW|native",
                    help="pixel size the model consumes. Default 224: every "
                         "snippet is resized to 224x224, the ImageNet regime "
@@ -870,6 +879,12 @@ def train(args, on_epoch_end=None) -> dict:
     model = build_model(args.arch, len(classes), pretrained=not args.no_pretrained,
                         weights_path=args.weights_path,
                         in_channels=in_channels).to(device)
+    if not args.no_prior_init:
+        # the head starts at the sampling prior of epoch 0 (a resumed run
+        # overwrites it with the checkpoint's weights below)
+        prior = init_classifier_prior(model, sampler.epoch_class_counts(len(classes)))
+        print("classifier bias initialised to the sampling prior: "
+              + ", ".join(f"{classes[c]} {p:.3f}" for c, p in enumerate(prior)))
     criterion = FocalLoss(len(classes), hn_index, gamma=args.focal_gamma,
                           hn_alpha=hn_alpha0).to(device)
     optimizer = build_optimizer(args, model)

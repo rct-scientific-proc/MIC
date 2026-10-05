@@ -15,6 +15,7 @@ initialized from the pretrained RGB kernel (see adapt_input_conv), so
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 from torch import nn
 from torchvision import models
@@ -78,6 +79,24 @@ def build_model(
             model.conv1, in_channels,
             pretrained=pretrained or weights_path is not None)
     return model
+
+
+def init_classifier_prior(model: nn.Module, class_counts) -> np.ndarray:
+    """Set the fresh head's bias to log(prior) so the untrained network
+    predicts the training-time class frequencies instead of a uniform
+    distribution (the RetinaNet / focal-loss prior initialisation). On a
+    heavily skewed draw a uniform start means every hard negative is
+    confidently wrong at step 0; the loss is then dominated by the majority
+    class and the first epochs are spent learning the prior, during which
+    validation recall sits at chance (the BatchNorm "collapse" transient).
+    Starting at the prior removes that phase. Zero-count classes get a
+    floor of one sample. Returns the prior that was applied."""
+    counts = np.asarray(class_counts, dtype=np.float64)
+    counts = np.maximum(counts, 1.0)
+    prior = counts / counts.sum()
+    with torch.no_grad():
+        model.fc.bias.copy_(torch.as_tensor(np.log(prior), dtype=model.fc.bias.dtype))
+    return prior
 
 
 def weight_url(arch: str) -> str:

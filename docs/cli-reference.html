@@ -355,7 +355,10 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     the batch statistics: for the first ~10–15 epochs validation metrics can look
     collapsed (recall stuck at chance) while train loss is near zero. It
     self-recovers. Pretrained weights start from sane ImageNet BN stats and
-    largely avoid the transient — one more reason they are the default.</div>
+    largely avoid the transient — one more reason they are the default — and
+    the head's default prior initialisation (<code>--no-prior-init</code>)
+    removes the other part of it, the epochs spent learning the class
+    frequencies.</div>
   </div>
 
   <div class="arg" id="t-weights-path">
@@ -413,6 +416,26 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     the size recorded in the run's config. <code>optimize_h5.py --resize
     N</code> remains the way to shrink <em>oversized</em> sources once, on
     disk, instead of per sample at load time.</div>
+  </div>
+
+  <div class="arg" id="t-no-prior-init">
+    <div class="arg-head"><span class="flag">--no-prior-init</span><span class="badge">switch</span><span class="badge">default: off (prior init on)</span></div>
+    <p>By default the fresh classifier head starts with its bias set to
+    <code>log(prior)</code>, where the prior is the class mix of the first
+    epoch's draw: every genuine class's count (rescue repeats included) and
+    the hard-negative budget under <code>--imbalance-ratio</code> /
+    <code>--imbalance-ratio-start</code>. The untrained network therefore
+    already predicts the training-time class frequencies — with 80% hard
+    negatives in the draw it starts out saying "hard negative, 0.8" rather
+    than "one third each". This is the focal-loss paper's initialisation
+    (RetinaNet sets its foreground prior to 0.01 for the same reason): from a
+    uniform start every hard negative is confidently wrong at step 0, the
+    loss is dominated by the majority class, and the first epochs are spent
+    learning the prior while validation recall sits at chance. The applied
+    prior is printed at start-up. <code>--resume</code> and smart-mode
+    rewinds load checkpoint weights over it, so it only ever shapes a fresh
+    start; the flag restores the uniform start (a zero bias) for A/B
+    comparisons.</p>
   </div>
 
   <h3>Training group</h3>
