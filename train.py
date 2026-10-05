@@ -288,6 +288,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "s <= m contributes zero loss and zero gradient and "
                         "training capacity goes to negatives that still "
                         "look genuine (0.05-0.2 typical)")
+    o.add_argument("--logit-adjust", type=float, default=0.0, metavar="TAU",
+                   help="logit adjustment: add TAU * log(prior) to the "
+                        "logits inside the training loss, where the prior "
+                        "is each epoch's class mix (genuine counts and the "
+                        "hard-negative budget). Validation and deployment "
+                        "use the raw logits, which then estimate the "
+                        "prior-corrected (balanced) scores - the "
+                        "Bayes-consistent fix for a skewed draw. TAU 1 is "
+                        "the standard; 0 = off. Pairs naturally with plain "
+                        "cross-entropy (--focal-gamma 0 --hn-alpha 1) as an "
+                        "alternative to alpha re-weighting")
 
     r = p.add_argument_group(
         "hard-negative pressure ramp",
@@ -906,7 +917,15 @@ def train(args, on_epoch_end=None) -> dict:
     model = build_model(args.arch, len(classes), pretrained=not args.no_pretrained,
                         weights_path=args.weights_path,
                         in_channels=in_channels).to(device)
-    if not args.no_prior_init:
+    if args.logit_adjust < 0:
+        raise SystemExit("--logit-adjust must be >= 0")
+    if args.logit_adjust > 0:
+        # the loss supplies the prior through the offset, so the head's raw
+        # output starts (and stays) prior-free
+        print(f"logit adjustment: tau {args.logit_adjust:g} - training logits "
+              "offset by tau*log(prior) of each epoch's draw; validation and "
+              "deployment use the raw logits (classifier bias left at zero)")
+    elif not args.no_prior_init:
         # the head starts at the sampling prior of epoch 0 (a resumed run
         # overwrites it with the checkpoint's weights below)
         prior = init_classifier_prior(model, sampler.epoch_class_counts(len(classes)))
@@ -1063,6 +1082,10 @@ def train(args, on_epoch_end=None) -> dict:
         criterion.set_hn_alpha(hn_alpha)
         sampler.set_ratio(ratio)
         sampler.set_epoch(epoch)
+        if args.logit_adjust > 0:
+            counts = sampler.epoch_class_counts(len(classes))
+            prior = np.maximum(counts, 1.0) / max(counts.sum(), 1.0)
+            criterion.set_logit_offset(args.logit_adjust * np.log(prior))
 
         progress = not args.no_progress
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer,

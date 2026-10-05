@@ -847,6 +847,32 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     is the "negatives far outweigh positives" starting point.</div>
   </div>
 
+  <div class="arg" id="t-logit-adjust">
+    <div class="arg-head"><span class="flag">--logit-adjust</span><span class="badge">TAU ≥ 0</span><span class="badge">default: 0 (off)</span></div>
+    <p>Logit adjustment (Menon et al., "Long-tail learning via logit
+    adjustment"). Inside the training loss the logits become
+    <code>z + τ·log(prior)</code>, where the prior is the class mix of the
+    current epoch's draw — genuine counts with any rescue repeats, and the
+    hard-negative budget, so it follows the ramp and the smart controller —
+    while validation, thresholds, and deployment use the raw <code>z</code>.
+    The network's raw output is thereby trained to estimate
+    <code>log P(y|x) − τ·log P(y)</code>: at τ = 1 the prior-free
+    (balanced) posterior, the Bayes-optimal score for a balanced error, which
+    is the right basis for the threshold sweep when the deployment prior is
+    unknown or differs from the draw. It is the principled alternative to
+    alpha re-weighting: the paper's recipe is plain cross-entropy with
+    τ = 1, here <code>--focal-gamma 0 --hn-alpha 1 --logit-adjust 1</code>.
+    Focal focusing and alphas may be combined with it, but both then correct
+    the same skew twice; treat them as alternatives and let the validation
+    sweep decide.</p>
+    <div class="callout"><span class="tag">Interaction</span>
+    With τ &gt; 0 the head's prior initialisation is skipped (the bias stays
+    at zero), because the offset already supplies the prior at training time.
+    Mining difficulties are computed from the raw logits, so what gets drawn
+    does not change. The sampler's imbalance cap still shapes the draw; the
+    adjustment corrects for whatever skew remains in it.</div>
+  </div>
+
   <div class="arg" id="t-class-alpha">
     <div class="arg-head"><span class="flag">--class-alpha</span><span class="badge">NAME=VALUE · repeatable</span><span class="badge">default: none</span></div>
     <p>Manual focal alpha for a genuine class, e.g.

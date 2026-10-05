@@ -46,6 +46,17 @@ class FocalLoss(nn.Module):
         gammas = torch.full((num_classes,), float(gamma))
         gammas[hard_negative_index] = self.hn_gamma
         self.register_buffer("gammas", gammas)
+        # logit adjustment (Menon et al. 2021): tau * log(prior) added to the
+        # logits inside the loss only, so the network's raw output learns
+        # the prior-corrected scores that validation and deployment use
+        self.register_buffer("logit_offset", torch.zeros(num_classes))
+
+    def set_logit_offset(self, offset) -> None:
+        """Per-epoch hook: the additive logit offset (None or zeros = off)."""
+        if offset is None:
+            self.logit_offset.zero_()
+        else:
+            self.logit_offset.copy_(torch.as_tensor(offset, dtype=self.logit_offset.dtype))
 
     def set_hn_alpha(self, hn_alpha: float) -> None:
         """Ramp hook: adjust the hard-negative class weight between epochs."""
@@ -60,7 +71,7 @@ class FocalLoss(nn.Module):
                 self.alpha[c] = a
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        log_p = F.log_softmax(logits, dim=1)
+        log_p = F.log_softmax(logits + self.logit_offset, dim=1)
         log_p_y = log_p.gather(1, targets.unsqueeze(1)).squeeze(1)
         p_y = log_p_y.exp()
         if self.hn_margin > 0:
