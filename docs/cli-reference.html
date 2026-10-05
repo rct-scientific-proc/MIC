@@ -1138,6 +1138,27 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
     score pool every epoch.</p>
   </div>
 
+  <div class="arg" id="t-mined-export">
+    <div class="arg-head"><span class="flag">--mined-export</span><span class="badge">int</span><span class="badge">default: 500 (0 = off)</span></div>
+    <p>After training, write <code>mined_hard_negatives.csv</code> into the
+    run directory: the N training hard negatives the miner found hardest,
+    hardest first, with their h5 row numbers and difficulty
+    (<code>1 − p(hard_negative)</code>, an EMA over the epochs the sample
+    was drawn). The miner is built on the assumption that labels are
+    clean; in survey data a "hard negative" that stays difficult across a
+    whole run is as likely to be an <em>unlabelled target</em> the
+    labeller missed as a genuinely confusing background — and mining then
+    spends the most training effort teaching the model to call real
+    targets hard negatives. The list makes that failure mode auditable:
+    <code>python curate.py DATA.h5 --rows runs/exp/mined_hard_negatives.csv</code>
+    opens exactly those snippets, in order, captioned with class, split and
+    difficulty, for relabelling in GeoLabeller or removal on the spot. The
+    report's "persistently hard negatives" grid shows the top of the same
+    list, and <code>report.py</code> writes the list for a run that lacks
+    one (from the best checkpoint's miner state), so older runs get it
+    too. Columns are listed under Outputs.</p>
+  </div>
+
   <h3>Optuna search (optional)</h3>
   <p class="syn">Hyper-parameter search built into the training CLI, needing only
   <code>pip install optuna</code>. <code>--optuna N</code> turns one invocation
@@ -1946,6 +1967,15 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
   image instead of the default composite — the same option as train.py's,
   for files whose bands are not meant for the eye; validated against the
   file's channel count.</p>
+  <p><code>--rows FILE</code> adds a <strong>[--rows list]</strong> view: a
+  CSV with an <code>h5_row</code> column — a run's
+  <code>mined_hard_negatives.csv</code> (train.py <code>--mined-export</code>),
+  the hard negatives the miner found hardest and therefore the first place
+  to look for unlabelled targets — or a plain text file with one row number
+  per line. The rows are shown in the file's order (hardest first for the
+  mined list), captioned with class, split and, when the file has one, the
+  difficulty; Remove works from the list as from any view, and removed rows
+  drop out of it until restored.</p>
   <p><code>--self-test DIR</code> runs an offscreen remove/save/restore
   round-trip against the given h5 (left clean) with screenshots — the
   smoke suite exercises it on a copy of its dataset whenever PyQt5 is
@@ -2195,6 +2225,22 @@ float32   0.0 – 1.0    already-scaled floats — 4x the disk/IO of uint8</div>
     <tr><td>repeat</td><td>per-epoch oversampling factor in effect (rescue; 1 = no oversampling)</td></tr>
   </table></div>
 
+  <h3>mined_hard_negatives.csv columns</h3>
+  <p>Written at the end of training from the final miner state
+  (<code>--mined-export N</code>, default 500), or by <code>report.py</code>
+  from the best checkpoint's miner state when a run has none: the
+  training hard negatives the miner found hardest, hardest first — the
+  audit list for unlabelled targets, opened directly by
+  <code>curate.py --rows</code>.</p>
+  <div class="table-wrap"><table>
+    <tr><th>column</th><th>meaning</th></tr>
+    <tr><td>rank</td><td>1 = hardest</td></tr>
+    <tr><td>h5_row</td><td>row in the h5 file (what curate.py shows as #row)</td></tr>
+    <tr><td>train_index</td><td>position within the training split (the miner's own index)</td></tr>
+    <tr><td>difficulty</td><td>EMA of 1 − p(hard_negative) over the epochs the sample was drawn, 0…1</td></tr>
+    <tr><td>seen</td><td>always 1: only samples the miner actually scored are listed</td></tr>
+  </table></div>
+
   <h3>Checkpoint filenames</h3>
   <p>The best and last checkpoints carry their role, epoch, headline metrics,
   and a UTC timestamp in the filename:</p>
@@ -2220,7 +2266,12 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
   overwritten, but each PDF embeds its own copies). evaluate.py writes its own
   report into its eval directory, and
   <code>python report.py &lt;run_dir&gt; &lt;data.h5&gt;</code> regenerates one for
-  any past run from its checkpoints and CSVs.</p>
+  any past run from its checkpoints and CSVs. When mining was on, the
+  report's "persistently hard training negatives" grid shows the hardest
+  of them captioned with their h5 row and difficulty, and
+  <code>mined_hard_negatives.csv</code> (written next to the report when
+  the run has none) lists the full audit set for
+  <code>curate.py --rows</code>.</p>
 
   <h3>Smart-mode files</h3>
   <p>Alongside <code>last.pt</code> / <code>best.pt</code>, a smart run maintains

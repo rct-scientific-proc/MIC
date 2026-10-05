@@ -3,6 +3,12 @@ split, inspect snippets, and remove bad ones from training entirely.
 
     python curate.py data.h5
 
+--rows FILE opens a review list on top of the class views: a CSV with an
+h5_row column (train.py / report.py write mined_hard_negatives.csv, the
+hard negatives the miner found hardest - candidates for unlabelled
+targets) or a plain text file of row numbers, shown in file order with
+each row's class, split, and any difficulty column.
+
 Removal never rewrites the (possibly huge, contiguous) images dataset:
 Save writes a `removed` boolean dataset into the h5 (created on first
 save; see h5_format.md) and every loader - training, evaluation, the
@@ -27,6 +33,26 @@ import h5py
 import numpy as np
 
 from dataset import SPLIT_NAMES, set_display_channel, to_display_uint8, validate_h5
+
+
+def read_rows_file(path, n: int) -> tuple[np.ndarray, dict[int, str]]:
+    """--rows: a CSV with an h5_row column (plus optional difficulty) or
+    one row number per line. Returns (rows in file order, {row: note})."""
+    import csv
+    text = Path(path).read_text(encoding="utf-8").strip().splitlines()
+    rows, notes = [], {}
+    if text and "h5_row" in text[0]:
+        for rec in csv.DictReader(text):
+            row = int(rec["h5_row"])
+            rows.append(row)
+            if rec.get("difficulty"):
+                notes[row] = f"d {float(rec['difficulty']):.2f}"
+    else:
+        rows = [int(t.strip()) for t in text if t.strip() and not t.startswith("#")]
+    rows = np.asarray(rows, dtype=np.int64)
+    if len(rows) and (rows.min() < 0 or rows.max() >= n):
+        raise ValueError(f"--rows: row numbers must be in 0..{n - 1}")
+    return rows, notes
 
 REPO = Path(__file__).resolve().parent
 INSTALL_HINT = "the curator needs PyQt5 - to run it: pip install PyQt5"
@@ -53,10 +79,12 @@ if QtWidgets is not None:
             QtCore.Qt.SmoothTransformation)
 
     class Curator(QtWidgets.QMainWindow):
-        def __init__(self, h5_path: str, display_channel=None):
+        def __init__(self, h5_path: str, display_channel=None, rows_file=None):
             super().__init__()
             self.h5_path = str(h5_path)
             validate_h5(self.h5_path)
+            self.listed: np.ndarray | None = None  # --rows review list
+            self.listed_notes: dict[int, str] = {}
             with h5py.File(self.h5_path, "r") as f:
                 set_display_channel(display_channel, int(f["images"].shape[3]))
                 self.classes = list(f["classes"].asstr()[:])
@@ -67,6 +95,8 @@ if QtWidgets is not None:
                                 if "removed" in f
                                 else np.zeros(self.n, dtype=bool))
             self.saved_removed = self.removed.copy()
+            if rows_file is not None:
+                self.listed, self.listed_notes = read_rows_file(rows_file, self.n)
             self._h5 = h5py.File(self.h5_path, "r")
             self.page = 0
 
@@ -78,6 +108,8 @@ if QtWidgets is not None:
             for _ in self.classes:
                 self.class_list.addItem("")
             self.class_list.addItem("")  # trailing "removed" review row
+            if self.listed is not None:
+                self.class_list.addItem("")  # --rows review list
             self.class_list.setCurrentRow(0)
             self.class_list.currentRowChanged.connect(self._view_changed)
 
@@ -150,12 +182,19 @@ if QtWidgets is not None:
 
         # ---- view state ---------------------------------------------
         def in_removed_view(self) -> bool:
-            return self.class_list.currentRow() >= len(self.classes)
+            return self.class_list.currentRow() == len(self.classes)
+
+        def in_listed_view(self) -> bool:
+            return (self.listed is not None
+                    and self.class_list.currentRow() == len(self.classes) + 1)
 
         def current_rows(self) -> np.ndarray:
-            """h5 row indices behind the current view, in file order."""
+            """h5 row indices behind the current view: file order, or the
+            --rows list's own order (its removed entries drop out)."""
             if self.in_removed_view():
                 return np.flatnonzero(self.removed)
+            if self.in_listed_view():
+                return self.listed[~self.removed[self.listed]]
             cls = max(self.class_list.currentRow(), 0)
             sel = self.split_combo.currentIndex()
             return np.flatnonzero((self.split == sel)
@@ -181,6 +220,10 @@ if QtWidgets is not None:
                 self.class_list.item(c).setText(text)
             self.class_list.item(len(self.classes)).setText(
                 f"[removed - all splits]   ({int(self.removed.sum())})")
+            if self.listed is not None:
+                left_n = int((~self.removed[self.listed]).sum())
+                self.class_list.item(len(self.classes) + 1).setText(
+                    f"[--rows list]   ({left_n} of {len(self.listed)})")
             removed_view = self.in_removed_view()
             self.remove_btn.setVisible(not removed_view)
             self.restore_btn.setVisible(removed_view)
@@ -201,9 +244,11 @@ if QtWidgets is not None:
             for row in chunk:
                 arr = self._h5["images"][int(row)]
                 caption = f"#{row}"
-                if self.in_removed_view():
+                if self.in_removed_view() or self.in_listed_view():
                     caption += (f"  {self.classes[self.labels[row]]}"
                                 f" · {SPLIT_NAMES[int(self.split[row])]}")
+                if self.in_listed_view() and row in self.listed_notes:
+                    caption += f" · {self.listed_notes[int(row)]}"
                 item = QtWidgets.QListWidgetItem(
                     QtGui.QIcon(_pixmap(arr, THUMB)), caption)
                 item.setData(QtCore.Qt.UserRole, int(row))
@@ -333,6 +378,26 @@ def _self_test(win, out_dir: Path) -> None:
     win.restore_selected()
     win.save()
     assert len(H5SnippetDataset(win.h5_path, SPLIT_TRAIN)) == base_train_len
+
+    if win.listed is not None:  # --rows: the list view, in file order
+        win.class_list.setCurrentRow(len(win.classes) + 1)
+        app.processEvents()
+        assert win.in_listed_view()
+        assert list(win.current_rows()) == list(win.listed)
+        assert win.grid.count() == min(len(win.listed), PAGE)
+        first = win.grid.item(0).text()
+        assert first.startswith(f"#{win.listed[0]}") and "·" in first, first
+        win.grab().save(str(out_dir / "rows_view.png"))
+        win.grid.item(0).setSelected(True)
+        win.remove_selected()  # removal works from the list; it drops out
+        assert list(win.current_rows()) == list(win.listed[1:])
+        win.class_list.setCurrentRow(len(win.classes))  # restore from the removed view
+        app.processEvents()
+        win.grid.selectAll()
+        win.restore_selected()
+        assert win.removed.sum() == 0
+        print(f"--rows list view: {len(win.listed)} rows in file order, "
+              "remove/restore round-trip")
     print("CURATE SELF-TEST PASSED")
 
 
@@ -343,6 +408,11 @@ def main(argv=None) -> None:
                     help="0-based band shown as a grayscale image (the second "
                          "channel is 1) - for bands not meant for the eye; "
                          "default: RGB as-is, 2-band files as false color")
+    ap.add_argument("--rows", metavar="FILE", default=None,
+                    help="review list: a CSV with an h5_row column (e.g. a "
+                         "run's mined_hard_negatives.csv) or one row number "
+                         "per line; adds a '[--rows list]' view in file "
+                         "order, captioned with class, split and difficulty")
     ap.add_argument("--self-test", metavar="DIR", default=None,
                     help="render offscreen, run a remove/save/restore "
                          "round-trip on the given h5 (left clean), save "
@@ -355,8 +425,9 @@ def main(argv=None) -> None:
     app = QtWidgets.QApplication(sys.argv[:1])
     app.setStyle("Fusion")
     try:
-        win = Curator(args.h5, display_channel=args.display_channel)
-    except ValueError as e:
+        win = Curator(args.h5, display_channel=args.display_channel,
+                      rows_file=args.rows)
+    except (ValueError, OSError) as e:
         raise SystemExit(str(e))
     win.show()
     if args.self_test is not None:

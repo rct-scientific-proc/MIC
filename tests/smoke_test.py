@@ -428,6 +428,16 @@ def main() -> None:
     if importlib.util.find_spec("PyQt5") is not None:
         run(REPO / "curate.py", h5_cur, "--self-test", OUT_ROOT / "gui_curate")
         assert (OUT_ROOT / "gui_curate" / "removed_view.png").exists()
+        # --rows: the main run's mined-negative audit list (same h5 layout:
+        # the f32 copy keeps the row numbering) opens as a review view
+        mined = out / "mined_hard_negatives.csv"
+        assert mined.exists(), "mined_hard_negatives.csv missing after training"
+        rows = list(csv.DictReader(open(mined)))
+        assert rows and rows[0]["rank"] == "1" and \
+            float(rows[0]["difficulty"]) >= float(rows[-1]["difficulty"])
+        run(REPO / "curate.py", h5_cur, "--rows", mined, "--self-test",
+            OUT_ROOT / "gui_curate_rows")
+        assert (OUT_ROOT / "gui_curate_rows" / "rows_view.png").exists()
     else:
         r = subprocess.run([sys.executable, str(REPO / "curate.py"), str(h5_cur)],
                            capture_output=True, text=True, cwd=REPO)

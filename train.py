@@ -43,7 +43,8 @@ from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
 from model import ARCHS, build_model, init_classifier_prior, set_backbone_trainable
-from sampler import HardNegativeMiner, ImbalanceCapSampler
+from sampler import (MINED_CSV, HardNegativeMiner, ImbalanceCapSampler,
+                     write_mined_csv)
 
 # --smart level presets: 1 = minimal/fast, 5 = marathon (slowly reach the
 # goal over a long horizon). Explicit flags always override their preset.
@@ -381,6 +382,15 @@ def build_parser() -> argparse.ArgumentParser:
     mi = p.add_argument_group("hard-negative mining")
     mi.add_argument("--no-mining", action="store_true",
                     help="uniform hard-negative subsampling instead of error-driven")
+    mi.add_argument("--mined-export", type=int, default=500, metavar="N",
+                    help="after training, write mined_hard_negatives.csv: "
+                         "the N training hard negatives the miner found "
+                         "hardest (highest difficulty EMA), hardest first, "
+                         "with their h5 rows - the audit list for label "
+                         "noise, since a negative that stays hard is often "
+                         "an unlabelled positive. Review them with "
+                         "curate.py --rows mined_hard_negatives.csv "
+                         "(0 = off)")
     mi.add_argument("--mining-random-frac", type=float, default=0.2,
                     help="share of the hard-negative budget drawn uniformly at random")
 
@@ -1245,6 +1255,14 @@ def train(args, on_epoch_end=None) -> dict:
 
     csv_file.close()
     class_csv_file.close()
+
+    if miner is not None and args.mined_export > 0:
+        n_mined = write_mined_csv(out_dir / MINED_CSV, miner.scores, miner.seen,
+                                  train_ds.labels, train_ds.indices, hn_index,
+                                  args.mined_export)
+        print(f"mined hard negatives: {n_mined} hardest written to "
+              f"{out_dir / MINED_CSV} (review: python curate.py {args.h5} "
+              f"--rows {out_dir / MINED_CSV})")
 
     if not args.no_report and find_checkpoint(out_dir, "best") is not None:
         try:

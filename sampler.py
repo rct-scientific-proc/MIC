@@ -51,10 +51,48 @@ class HardNegativeMiner:
     def state_dict(self) -> dict:
         return {"scores": self.scores.copy(), "seen": self.seen.copy(), "ema_decay": self.ema_decay}
 
+    def hardest(self, n: int) -> np.ndarray:
+        """Training-split positions of the n hardest hard negatives seen so
+        far (highest difficulty EMA first)."""
+        cand = np.flatnonzero(self.is_hn & self.seen)
+        order = np.argsort(-self.scores[cand], kind="stable")
+        return cand[order[:n]]
+
     def load_state_dict(self, state: dict) -> None:
         self.scores = np.asarray(state["scores"], dtype=np.float64).copy()
         self.seen = np.asarray(state["seen"], dtype=bool).copy()
         self.ema_decay = float(state["ema_decay"])
+
+
+MINED_CSV = "mined_hard_negatives.csv"
+MINED_FIELDS = ["rank", "h5_row", "train_index", "difficulty", "seen"]
+
+
+def write_mined_csv(path, scores, seen, labels, h5_rows, hard_negative_index,
+                    n: int) -> int:
+    """mined_hard_negatives.csv: the n training hard negatives the miner
+    found hardest, hardest first - the audit list for label noise. A hard
+    negative that stays difficult across epochs is either a genuinely
+    confusing background or an unlabelled positive; both deserve a look,
+    and curate.py --rows opens exactly these snippets. Columns: rank
+    (1 = hardest), h5_row (the row in the file - what curate.py shows as
+    #row), train_index (position within the training split), difficulty
+    (EMA of 1 - p(hard_negative), 0..1), seen (how the score was formed:
+    always 1 here). Returns the number of rows written."""
+    import csv
+    scores = np.asarray(scores, dtype=np.float64)
+    seen = np.asarray(seen, dtype=bool)
+    labels = np.asarray(labels)
+    cand = np.flatnonzero((labels == hard_negative_index) & seen)
+    order = cand[np.argsort(-scores[cand], kind="stable")][:max(int(n), 0)]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=MINED_FIELDS)
+        w.writeheader()
+        for rank, p in enumerate(order, start=1):
+            w.writerow({"rank": rank, "h5_row": int(h5_rows[p]),
+                        "train_index": int(p),
+                        "difficulty": f"{scores[p]:.6f}", "seen": 1})
+    return len(order)
 
 
 class ImbalanceCapSampler(Sampler[int]):

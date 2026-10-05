@@ -36,6 +36,7 @@ from metrics import (apply_threshold, calibration_bins, collect_probs,
                      final_prediction, genuine_vs_hn_roc, genuineness_scores,
                      non_hn_argmax, per_class_ovr_roc)
 from model import build_model
+from sampler import MINED_CSV, write_mined_csv
 from plots import (plot_calibration, plot_confusion, plot_confusion_grid,
                    plot_controller_timeline, plot_genuine_vs_hn_roc,
                    plot_history, plot_per_class_recall_history,
@@ -250,7 +251,9 @@ def _class_sample_pages(h5_path, split, probs, labels, operating, hn_index,
                      + (f"  {flags}" if flags else ""))
             pages.append({"name": name, "stats": stats, "grids": grids})
 
-        # training-split hard negatives the miner found hardest (EMA loss)
+        # training-split hard negatives the miner found hardest (difficulty
+        # EMA); the full audit list goes to mined_hard_negatives.csv next to
+        # the report (the best checkpoint's miner state), for curate.py --rows
         miner_grid = None
         ms = best.get("miner_state")
         if ms is not None:
@@ -259,16 +262,34 @@ def _class_sample_pages(h5_path, split, probs, labels, operating, hn_index,
             seen = np.asarray(ms["seen"], dtype=bool)
             cand = np.flatnonzero((train_ds.labels == hn_index) & seen)
             if len(cand):
-                top = cand[np.argsort(-m_scores[cand])][:thumbs]
-                caps = [f"EMA loss {m_scores[p]:.2f}" for p in top]
+                top = cand[np.argsort(-m_scores[cand], kind="stable")][:thumbs]
+                caps = [f"#{int(train_ds.indices[p])}  d {m_scores[p]:.2f}"
+                        for p in top]
                 imgs = [f["images"][int(train_ds.indices[p])] for p in top]
                 path = assets / "miner_hn.png"
                 plot_sample_grid(imgs, caps,
                                  "Persistently hard training negatives "
-                                 "(miner's EMA loss)", path)
+                                 "(miner's difficulty EMA)", path)
+                # the training run writes this list from its final miner
+                # state (--mined-export); it is only generated here when
+                # missing, e.g. for a run from before the feature
+                csv_path = assets.parent / MINED_CSV
+                n_export = int((best.get("config") or {}).get("mined_export", 500) or 0)
+                if not csv_path.exists() and n_export > 0:
+                    write_mined_csv(csv_path, m_scores, seen, train_ds.labels,
+                                    train_ds.indices, hn_index, n_export)
+                n_csv = (sum(1 for _ in open(csv_path, encoding="utf-8")) - 1
+                         if csv_path.exists() else 0)
                 miner_grid = (path, "The training hard negatives that stayed "
                                     "difficult across epochs, per the mining "
-                                    "tracker.")
+                                    "tracker, captioned with their h5 row and "
+                                    "difficulty (1 - p(hard_negative)). A "
+                                    "negative that never gets easy is either "
+                                    "a genuinely confusing background or an "
+                                    f"unlabelled target: the {n_csv} hardest "
+                                    f"are listed in {MINED_CSV} - open them "
+                                    "with curate.py --rows to check the "
+                                    "labels.")
     return pages, omitted, miner_grid
 
 
