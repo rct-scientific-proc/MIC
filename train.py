@@ -43,8 +43,8 @@ from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
 from model import ARCHS, build_model, init_classifier_prior, set_backbone_trainable
-from sampler import (MINED_CSV, HardNegativeMiner, ImbalanceCapSampler,
-                     write_mined_csv)
+from sampler import (MINED_CSV, ClassBalancedSampler, HardNegativeMiner,
+                     ImbalanceCapSampler, write_mined_csv)
 
 # --smart level presets: 1 = minimal/fast, 5 = marathon (slowly reach the
 # goal over a long horizon). Explicit flags always override their preset.
@@ -393,6 +393,26 @@ def build_parser() -> argparse.ArgumentParser:
                          "(0 = off)")
     mi.add_argument("--mining-random-frac", type=float, default=0.2,
                     help="share of the hard-negative budget drawn uniformly at random")
+
+    cr = p.add_argument_group(
+        "classifier re-training (optional tail phase)",
+        "after the main run, re-train only the classifier head on the best "
+        "checkpoint's frozen features with a class-balanced draw (every "
+        "class equally likely, hard_negative included) - the decoupled "
+        "representation/classifier recipe for long-tailed data. Each epoch "
+        "is validated and swept like any other, logged with event 'crt', "
+        "and replaces the best checkpoint only if it ranks higher.")
+    cr.add_argument("--crt-epochs", type=int, default=0, metavar="N",
+                    help="classifier re-training epochs after the main run "
+                         "(0 = off); each draws as many samples as a main "
+                         "epoch, balanced across classes")
+    cr.add_argument("--crt-lr", type=float, default=None,
+                    help="learning rate for the head during re-training "
+                         "(default: --lr / 10)")
+    cr.add_argument("--crt-reinit", action="store_true",
+                    help="re-initialise the head before re-training (the "
+                         "paper's variant) instead of starting from the "
+                         "trained head")
 
     ou = p.add_argument_group(
         "optuna search",
@@ -808,7 +828,7 @@ def selection_key(op: dict) -> tuple:
 def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classes,
                     hn_index, op, best_key, miner=None, ramp_progress=0,
                     controller=None, ema_model=None, in_channels=3,
-                    input_size=None) -> None:
+                    input_size=None, crt_done=0) -> None:
     # model_state is always the DEPLOYED weights (the EMA twin when --ema is
     # on); raw_model_state keeps the underlying training weights for resume
     deploy = ema_model.module if ema_model is not None else model
@@ -824,6 +844,7 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
         "epoch": epoch,
         "in_channels": in_channels,
         "input_size": list(input_size) if input_size is not None else [224, 224],
+        "crt_done": crt_done,
         "display_channel": args.display_channel,
         "config": vars(args),
         "classes": classes,
@@ -995,6 +1016,7 @@ def train(args, on_epoch_end=None) -> dict:
     best_epoch = None
     stopped_early = False
     ramp_progress = 0
+    crt_done = 0
     if args.resume:
         resume_path = find_checkpoint(args.resume, "last")
         if resume_path is None:
@@ -1016,6 +1038,7 @@ def train(args, on_epoch_end=None) -> dict:
         best_key = (ckpt.get("best_key")
                     if find_checkpoint(out_dir, "best") is not None else None)
         ramp_progress = ckpt.get("ramp_progress", 0)
+        crt_done = int(ckpt.get("crt_done") or 0)
         if miner is not None and ckpt.get("miner_state") is not None:
             miner.load_state_dict(ckpt["miner_state"])
         if controller is not None and ckpt.get("controller_state") is not None:
@@ -1038,6 +1061,49 @@ def train(args, on_epoch_end=None) -> dict:
     if new_class_csv:
         class_writer.writeheader()
 
+    def log_epoch(epoch, train_loss, op, hn_alpha, ratio, ramp_progress, p_used,
+                  cycle_used, event, lr, dt, class_alphas, repeats_used):
+        """One row in metrics.csv and one per genuine class in
+        class_thresholds.csv; returns (class_thr, thr_values) for the
+        console line."""
+        class_thr = op.get("class_thresholds")
+        thr_values = list(class_thr.values()) if class_thr else [op["threshold"]]
+        writer.writerow({
+            "epoch": epoch, "train_loss": f"{train_loss:.6f}",
+            "threshold": f"{op['threshold']:.6f}",
+            "threshold_mode": args.threshold_mode,
+            "thr_min": f"{min(thr_values):.6f}", "thr_max": f"{max(thr_values):.6f}",
+            "target_met": int(op["target_met"]),
+            "recall": f"{op['recall']:.6f}", "recall_agg": op["recall_agg"],
+            "specificity": f"{op['specificity']:.6f}",
+            "max_recall": f"{op['max_recall']:.6f}",
+            "auroc": f"{op['auroc']:.6f}", "hn_alpha": f"{hn_alpha:.4f}",
+            "imbalance_ratio": ratio, "ramp_progress": ramp_progress,
+            "pressure": p_used if p_used == "" else f"{p_used:.3f}",
+            "cycle": cycle_used, "event": event,
+            "lr": f"{lr:.3e}", "epoch_time_s": f"{dt:.1f}",
+        })
+        csv_file.flush()
+        fallback_set = set(op.get("fallback_classes", []))
+        for c, r in sorted(op["per_class_recall"].items()):
+            class_writer.writerow({
+                "epoch": epoch, "class": classes[c],
+                "threshold": f"{(class_thr or {}).get(c, op['threshold']):.6f}",
+                "recall": f"{r:.6f}",
+                "predicted_n": op["predicted_counts"].get(c, 0),
+                "accepted_n": op.get("accepted_counts", {}).get(c, ""),
+                "fallback": int(c in fallback_set) if class_thr else "",
+                "alpha": f"{class_alphas.get(c, 1.0):.3f}",
+                "repeat": repeats_used.get(c, 1),
+            })
+        class_csv_file.flush()
+        return class_thr, thr_values
+
+    progress = not args.no_progress
+    epoch = start_epoch - 1  # the last epoch index run (none yet)
+    class_alphas = {c: base_alphas.get(c, 1.0) for c in range(len(classes))
+                    if c != hn_index}
+    hn_alpha, ratio = ramp_values(args, ramp_progress, n_genuine, n_hn)
     epochs_since_best = 0
     improved_this_cycle = False
     stop = False
@@ -1097,7 +1163,6 @@ def train(args, on_epoch_end=None) -> dict:
             prior = np.maximum(counts, 1.0) / max(counts.sum(), 1.0)
             criterion.set_logit_offset(args.logit_adjust * np.log(prior))
 
-        progress = not args.no_progress
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer,
                                      scaler, device, amp, miner=miner,
                                      ema_model=ema_model,
@@ -1170,39 +1235,10 @@ def train(args, on_epoch_end=None) -> dict:
                 if args.patience and controller.cycles_since_best >= args.patience:
                     stop = True
 
-        class_thr = op.get("class_thresholds")
-        thr_values = list(class_thr.values()) if class_thr else [op["threshold"]]
-        writer.writerow({
-            "epoch": epoch, "train_loss": f"{train_loss:.6f}",
-            "threshold": f"{op['threshold']:.6f}",
-            "threshold_mode": args.threshold_mode,
-            "thr_min": f"{min(thr_values):.6f}", "thr_max": f"{max(thr_values):.6f}",
-            "target_met": int(op["target_met"]),
-            "recall": f"{op['recall']:.6f}", "recall_agg": op["recall_agg"],
-            "specificity": f"{op['specificity']:.6f}",
-            "max_recall": f"{op['max_recall']:.6f}",
-            "auroc": f"{op['auroc']:.6f}", "hn_alpha": f"{hn_alpha:.4f}",
-            "imbalance_ratio": ratio, "ramp_progress": ramp_progress,
-            "pressure": p_used if p_used == "" else f"{p_used:.3f}",
-            "cycle": cycle_used,
-            "event": " ".join(e for e in (freeze_event, event) if e),
-            "lr": f"{lr:.3e}", "epoch_time_s": f"{dt:.1f}",
-        })
-        csv_file.flush()
-
-        fallback_set = set(op.get("fallback_classes", []))
-        for c, r in sorted(op["per_class_recall"].items()):
-            class_writer.writerow({
-                "epoch": epoch, "class": classes[c],
-                "threshold": f"{(class_thr or {}).get(c, op['threshold']):.6f}",
-                "recall": f"{r:.6f}",
-                "predicted_n": op["predicted_counts"].get(c, 0),
-                "accepted_n": op.get("accepted_counts", {}).get(c, ""),
-                "fallback": int(c in fallback_set) if class_thr else "",
-                "alpha": f"{class_alphas.get(c, 1.0):.3f}",
-                "repeat": repeats_used.get(c, 1),
-            })
-        class_csv_file.flush()
+        class_thr, thr_values = log_epoch(
+            epoch, train_loss, op, hn_alpha, ratio, ramp_progress, p_used,
+            cycle_used, " ".join(e for e in (freeze_event, event) if e), lr, dt,
+            class_alphas, repeats_used)
 
         marker = " *" if improved else ""
         if class_thr:
@@ -1252,6 +1288,86 @@ def train(args, on_epoch_end=None) -> dict:
         if controller is None and args.patience and epochs_since_best >= args.patience:
             print(f"early stop: no improvement for {args.patience} epochs")
             break
+
+    # ---- classifier re-training: the head alone, class-balanced draw, on
+    # the best checkpoint's frozen features --------------------------------
+    best_path = find_checkpoint(out_dir, "best")
+    if args.crt_epochs > crt_done and not stopped_early and best_path is not None:
+        best_ck = load_checkpoint(best_path, device)
+        model.load_state_dict(best_ck["model_state"])  # the deployed weights
+        ema_model = None  # cRT deploys the model itself
+        if args.crt_reinit:
+            model.fc.reset_parameters()
+            with torch.no_grad():
+                model.fc.bias.zero_()  # a balanced draw has a uniform prior
+        set_backbone_trainable(model, False)
+        crt_lr = args.crt_lr if args.crt_lr is not None else args.lr / 10
+        optimizer = build_optimizer(args, model)
+        for g in optimizer.param_groups:
+            g["lr"] = crt_lr
+        scaler = torch.amp.GradScaler(device.type, enabled=amp)
+        criterion.set_logit_offset(None)  # no skew left to adjust for
+        balanced = ClassBalancedSampler(train_ds.labels, len(sampler), seed=args.seed)
+        crt_loader = DataLoader(train_ds, batch_size=args.batch_size,
+                                sampler=balanced, **loader_kw)
+        print(f"classifier re-training: {args.crt_epochs - crt_done} epoch(s) "
+              f"on the frozen features of {best_path.name}, class-balanced "
+              f"draw of {len(balanced)} samples/epoch, lr {crt_lr:.2e}"
+              + (", head re-initialised" if args.crt_reinit
+                 else ", from the trained head"))
+        # cRT epochs continue the numbering after the last main epoch; a
+        # checkpoint written during cRT sits crt_done epochs past it, and
+        # a resumed run's best may be one this process never saved
+        first_crt_epoch = epoch + 1 - crt_done
+        if best_epoch is None:
+            best_epoch = int(best_ck["epoch"])
+        crt_epoch = epoch
+        for i in range(crt_done, args.crt_epochs):
+            t0 = time.time()
+            crt_epoch = first_crt_epoch + i
+            balanced.set_epoch(crt_epoch)
+            train_loss = train_one_epoch(model, crt_loader, criterion, optimizer,
+                                         scaler, device, amp, miner=None,
+                                         ema_model=None,
+                                         desc=f"epoch {crt_epoch} crt",
+                                         progress=progress)
+            op = validate(model, val_loader, device, hn_index, args.target_recall,
+                          args.recall_agg, min_threshold=args.min_threshold,
+                          threshold_mode=args.threshold_mode,
+                          per_class_min_count=args.per_class_min_count, amp=amp,
+                          desc=f"epoch {crt_epoch} validate", progress=progress)
+            dt = time.time() - t0
+            key = selection_key(op)
+            improved = best_key is None or key > tuple(best_key)
+            ckpt_kw = dict(model=model, optimizer=optimizer, scaler=scaler,
+                           epoch=crt_epoch, args=args, classes=classes,
+                           hn_index=hn_index, op=op, miner=miner,
+                           ramp_progress=ramp_progress, controller=controller,
+                           ema_model=None, in_channels=in_channels,
+                           input_size=input_hw, crt_done=i + 1)
+            if improved:
+                best_key = key
+                best_op, best_epoch = op, crt_epoch
+                bp = out_dir / checkpoint_name("best", crt_epoch, op)
+                save_checkpoint(bp, best_key=best_key, **ckpt_kw)
+                prune_role(out_dir, "best", bp)
+            class_thr, thr_values = log_epoch(
+                crt_epoch, train_loss, op, hn_alpha, ratio, ramp_progress, "", "",
+                "crt", crt_lr, dt, class_alphas, {})
+            thr_txt = (f"thr {min(thr_values):.3f}..{max(thr_values):.3f}"
+                       if class_thr else f"thr {op['threshold']:.4f}")
+            print(f"epoch {crt_epoch:3d}  loss {train_loss:.4f}  "
+                  f"{op['recall_agg']}-recall {op['recall']:.4f}"
+                  f"{'' if op['target_met'] else ' (below target)'}  "
+                  f"spec {op['specificity']:.4f}  {thr_txt}  "
+                  f"auroc {op['auroc']:.4f}  {dt:.1f}s  [crt]"
+                  f"{' *' if improved else ''}")
+        last_path = out_dir / checkpoint_name("last", crt_epoch, op)
+        save_checkpoint(last_path, best_key=best_key, **ckpt_kw)
+        prune_role(out_dir, "last", last_path)
+        print(f"classifier re-training done: best is epoch {best_epoch}"
+              + (" (a re-trained head)" if best_epoch >= first_crt_epoch else
+                 " (the main run's; re-training did not rank higher)"))
 
     csv_file.close()
     class_csv_file.close()

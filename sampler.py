@@ -95,6 +95,39 @@ def write_mined_csv(path, scores, seen, labels, h5_rows, hard_negative_index,
     return len(order)
 
 
+class ClassBalancedSampler(Sampler[int]):
+    """num_samples positions per epoch, each drawn by picking a class
+    uniformly among those present and then a sample uniformly within it
+    (with replacement): every class, hard_negative included, gets the same
+    share of the epoch. The classifier re-training draw (train.py
+    --crt-epochs): with the features frozen, a balanced draw re-fits the
+    head's decision boundary free of the training prior."""
+
+    def __init__(self, labels, num_samples: int, seed: int = 0):
+        self.labels = np.asarray(labels)
+        self.by_class = [np.flatnonzero(self.labels == c)
+                         for c in np.unique(self.labels)]
+        self.num_samples = int(num_samples)
+        self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def __iter__(self):
+        gen = torch.Generator()
+        gen.manual_seed(self.seed * 7_919 + self.epoch)
+        cls = torch.randint(len(self.by_class), (self.num_samples,), generator=gen).numpy()
+        out = np.empty(self.num_samples, dtype=np.int64)
+        for k, pos in enumerate(self.by_class):
+            m = cls == k
+            out[m] = pos[torch.randint(len(pos), (int(m.sum()),), generator=gen).numpy()]
+        return iter(out.tolist())
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+
 class ImbalanceCapSampler(Sampler[int]):
     """Yields one epoch of dataset positions: every genuine sample plus at most
     `ratio * n_genuine` hard negatives.

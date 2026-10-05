@@ -1159,6 +1159,60 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
     too. Columns are listed under Outputs.</p>
   </div>
 
+  <h3>Classifier re-training (optional tail phase)</h3>
+  <p>The decoupled recipe for long-tailed data (Kang et al., "Decoupling
+  representation and classifier"): the features a network learns under an
+  imbalanced draw are good, but its linear head is biased toward the
+  classes it saw most. Re-fitting only the head on frozen features with a
+  <em>class-balanced</em> draw recovers a boundary that is not skewed by
+  the training prior. Here it runs as a tail phase after the main loop,
+  on the best checkpoint's deployed weights: every class — hard_negative
+  included — is drawn with equal probability (uniform over classes, then
+  uniform within the class, with replacement), the backbone is frozen as
+  under <code>--freeze-epochs</code>, mining and logit adjustment are off
+  (there is no skew left to correct), and each epoch is validated, swept
+  and ranked exactly like a main epoch. The best checkpoint is replaced
+  only when a re-trained head ranks higher on the usual key, so the phase
+  can never make a run worse; its epochs continue the numbering, carry
+  <code>crt</code> in the metrics <code>event</code> column, and the
+  <code>last</code> checkpoint records <code>crt_done</code> so a resumed
+  run never repeats them.</p>
+
+  <div class="arg" id="t-crt-epochs">
+    <div class="arg-head"><span class="flag">--crt-epochs</span><span class="badge">int</span><span class="badge">default: 0 (off)</span></div>
+    <p>Re-training epochs after the main run. Each draws as many samples as
+    a main epoch (the sampler's length at the end of the run), balanced
+    across classes, and runs at the frozen-backbone speed. With the
+    features fixed this is a convex logistic fit on a balanced draw, so a
+    handful of epochs (3–10) converges. The console marks the epochs
+    <code>[crt]</code> and the closing line says whether the best
+    checkpoint is now a re-trained head.</p>
+  </div>
+
+  <div class="arg" id="t-crt-lr">
+    <div class="arg-head"><span class="flag">--crt-lr</span><span class="badge">float</span><span class="badge">default: --lr / 10</span></div>
+    <p>Learning rate for the head during re-training, constant across the
+    phase. Starting from the trained head (the default) wants a gentle
+    rate; with <code>--crt-reinit</code> the main <code>--lr</code> is
+    reasonable.</p>
+  </div>
+
+  <div class="arg" id="t-crt-reinit">
+    <div class="arg-head"><span class="flag">--crt-reinit</span><span class="badge">switch</span><span class="badge">default: off</span></div>
+    <p>Re-initialise the head (fresh weights, zero bias — the balanced
+    draw's prior is uniform) before re-training, the paper's variant.
+    Off, re-training starts from the trained head, which converges faster
+    and cannot drift far from a working boundary; on, the head is fitted
+    from scratch to the frozen features, the cleaner experiment when the
+    main run's head is suspected to be badly biased.</p>
+    <div class="callout"><span class="tag">Interaction</span>
+    <code>--ema</code>: the phase starts from the averaged weights (what
+    <code>model_state</code> holds) and deploys the re-trained model
+    directly; its checkpoints carry no EMA twin. Smart-mode state and the
+    miner are saved through unchanged. The per-class thresholds and the
+    report follow whichever checkpoint ends up best.</div>
+  </div>
+
   <h3>Optuna search (optional)</h3>
   <p class="syn">Hyper-parameter search built into the training CLI, needing only
   <code>pip install optuna</code>. <code>--optuna N</code> turns one invocation
@@ -2204,7 +2258,7 @@ float32   0.0 – 1.0    already-scaled floats — 4x the disk/IO of uint8</div>
     <tr><td>ramp_progress</td><td>ramp steps completed (0…<code>--ramp-epochs</code>)</td></tr>
     <tr><td>pressure</td><td>smart mode: pressure level trained at this epoch (blank otherwise)</td></tr>
     <tr><td>cycle</td><td>smart mode: LR-cycle index (blank otherwise)</td></tr>
-    <tr><td>event</td><td>smart mode, boundary epochs only: raise / hold / rewind / ceiling; freeze / unfreeze mark the <code>--freeze-epochs</code> transitions</td></tr>
+    <tr><td>event</td><td>smart mode, boundary epochs only: raise / hold / rewind / ceiling; freeze / unfreeze mark the <code>--freeze-epochs</code> transitions; crt marks classifier re-training epochs (<code>--crt-epochs</code>)</td></tr>
     <tr><td>lr</td><td>learning rate actually used this epoch (cosine-cycled in smart mode)</td></tr>
     <tr><td>epoch_time_s</td><td>wall-clock seconds for train + validate</td></tr>
   </table></div>
@@ -2288,7 +2342,8 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
   2-band model rebuilds with the right stem), the input size
   (<code>input_size</code>, <code>[height, width]</code>, so every consumer
   feeds the scale the model was trained at), the <code>--imagenet-norm</code>
-  flag, <strong>the operating
+  flag, the number of classifier re-training epochs completed
+  (<code>crt_done</code>), <strong>the operating
   threshold(s)</strong> — the global scalar plus, in per-class mode, the
   {class: threshold} map and the floor — that epoch's validation metrics, the
   best-so-far selection key, miner scores, and ramp progress. Everything needed
@@ -2341,16 +2396,30 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
 
   <h3>Very difficult, highly imbalanced dataset (the full toolkit)</h3>
   <pre><code>python train.py data.h5 --arch resnet34 --amp --workers 4 ^
+    --input-size 128 --freeze-epochs 2 ^
     --smart 4 --recall-first 4 ^
     --target-recall 0.95 --recall-agg harmonic ^
     --threshold-mode per-class --per-class-min-count 30 --min-threshold 0.2 ^
     --class-alpha-auto --ema ^
+    --focal-gamma 1 --hn-gamma 4 --hn-margin 0.1 ^
     --imbalance-ratio 4.0 --hn-alpha-end 1.0 ^
     --augment rotation:p=0.7,degrees=20 gaussianblur erasing:p=0.3,scale=0.02-0.1 ^
+    --crt-epochs 5 ^
     --out-dir runs/hard1</code></pre>
   <p class="syn">Every lever the pipeline has for the case where rare genuine
   classes are drowning in hard negatives, in one run. What each line buys:</p>
   <ul>
+    <li><code>--input-size 128 --freeze-epochs 2</code>: train at 128 px —
+    on 64 px snippets ~2.3× faster per epoch than the 224 default with a
+    4×4 final feature map — and the head alone for the first two epochs, so
+    the fresh head settles before imbalanced gradients reach the pretrained
+    features. The head starts prior-initialised (the default), so those
+    epochs begin at the class frequencies instead of learning them. Compare
+    against a 224 run once; from random init, go <code>native</code>.</li>
+    <li><code>--focal-gamma 1 --hn-gamma 4 --hn-margin 0.1</code>: asymmetric
+    focusing — gentle on positives, hard on the mass of easy negatives, and
+    a negative already rejected with genuineness ≤ 0.1 drops out of the loss
+    entirely, so capacity goes to the negatives near the threshold.</li>
     <li><code>--smart 4 --recall-first 4</code>: a long, patient run (150
     epochs, 15-epoch cycles, small pressure steps, rescue on) that opens with
     hard negatives almost switched off (<code>hn-alpha</code> 0.02, ratio
@@ -2379,6 +2448,10 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
     <li><code>--augment …</code>: the label-safe subset (geometry, blur, small
     erasures) — never the photometric ops on intensity-coded classes. Add your
     own domain augmentations with <code>--augment-plugin</code>.</li>
+    <li><code>--crt-epochs 5</code>: after the main run, re-fit the head on
+    the frozen features with a class-balanced draw; the result replaces the
+    best checkpoint only if it ranks higher, so it costs five cheap epochs
+    and nothing else.</li>
   </ul>
   <p class="syn"><strong>Read the run before changing anything.</strong> If
   <code>max_recall</code> in <code>metrics.csv</code> clears the target but the
@@ -2389,11 +2462,16 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
   say which class and whether it is threshold-fixable (yellow) or a genuine
   confusion (red).</p>
   <p class="syn"><strong>When that still is not enough</strong>, in order:
-  (1) curate — <code>python curate.py data.h5</code> to remove mislabeled or
-  ambiguous snippets, which beats any loss function; (2) pin a stubborn class
-  by hand with <code>--class-alpha NAME=2.5</code> on top of the auto alphas;
-  (3) search the loss/optimizer space cheaply at low effort, then retrain the
-  winner at full effort:</p>
+  (1) curate — start with the run's audit list,
+  <code>python curate.py data.h5 --rows runs/hard1/mined_hard_negatives.csv</code>,
+  the negatives the miner found hardest, where unlabelled targets hide
+  (relabel them in GeoLabeller or remove them), then the class views for
+  mislabeled or ambiguous snippets; this beats any loss function; (2) pin a
+  stubborn class by hand with <code>--class-alpha NAME=2.5</code> on top of
+  the auto alphas; (3) try the prior-correction alternative to alpha
+  weighting, <code>--focal-gamma 0 --hn-alpha 1 --logit-adjust 1</code>
+  with the same sampler settings; (4) search the loss/optimizer space
+  cheaply at low effort, then retrain the winner at full effort:</p>
   <pre><code>python train.py data.h5 --smart 1 --recall-first 3 --class-alpha-auto --ema ^
     --recall-agg harmonic --optuna 30 --optuna-prune-warmup 6 ^
     --out-dir runs/hard_search
