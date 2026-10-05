@@ -258,9 +258,28 @@ def build_parser() -> argparse.ArgumentParser:
                         "on top")
     o.add_argument("--imbalance-ratio", type=float, default=math.inf,
                    help="max hard negatives per epoch = ratio * genuine count (1..inf)")
-    o.add_argument("--focal-gamma", type=float, default=2.0)
+    o.add_argument("--focal-gamma", type=float, default=2.0,
+                   help="focal focusing exponent for genuine classes (and "
+                        "for hard negatives unless --hn-gamma is set): 0 is "
+                        "plain cross-entropy, higher values discount "
+                        "already-easy samples more")
     o.add_argument("--hn-alpha", type=float, default=0.25,
                    help="focal alpha for the hard_negative class (genuine classes = 1)")
+    o.add_argument("--hn-gamma", type=float, default=None,
+                   help="asymmetric focusing: a separate gamma for the "
+                        "hard_negative class (default: --focal-gamma). With "
+                        "negatives outnumbering positives by orders of "
+                        "magnitude, a larger exponent here (the asymmetric-"
+                        "loss paper uses 4, with 0-1 for positives) stops "
+                        "the mass of easy negatives from dominating the "
+                        "gradient")
+    o.add_argument("--hn-margin", type=float, default=0.0,
+                   help="asymmetric probability margin m in [0, 1): a hard "
+                        "negative's probability is shifted by +m before the "
+                        "loss, so one already rejected with genuineness "
+                        "s <= m contributes zero loss and zero gradient and "
+                        "training capacity goes to negatives that still "
+                        "look genuine (0.05-0.2 typical)")
 
     r = p.add_argument_group(
         "hard-negative pressure ramp",
@@ -885,8 +904,15 @@ def train(args, on_epoch_end=None) -> dict:
         prior = init_classifier_prior(model, sampler.epoch_class_counts(len(classes)))
         print("classifier bias initialised to the sampling prior: "
               + ", ".join(f"{classes[c]} {p:.3f}" for c, p in enumerate(prior)))
-    criterion = FocalLoss(len(classes), hn_index, gamma=args.focal_gamma,
-                          hn_alpha=hn_alpha0).to(device)
+    try:
+        criterion = FocalLoss(len(classes), hn_index, gamma=args.focal_gamma,
+                              hn_alpha=hn_alpha0, hn_gamma=args.hn_gamma,
+                              hn_margin=args.hn_margin).to(device)
+    except ValueError as e:
+        raise SystemExit(f"--hn-margin: {e}")
+    if args.hn_gamma is not None or args.hn_margin > 0:
+        print(f"asymmetric focal loss: gamma {args.focal_gamma:g} genuine / "
+              f"{criterion.hn_gamma:g} hard_negative, margin {args.hn_margin:g}")
     optimizer = build_optimizer(args, model)
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
     ema_model = build_ema(model, args.ema) if args.ema is not None else None

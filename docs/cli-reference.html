@@ -764,13 +764,14 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
   <div class="arg" id="t-focal-gamma">
     <div class="arg-head"><span class="flag">--focal-gamma</span><span class="badge">float</span><span class="badge">default: 2.0</span></div>
     <p>The focusing exponent in the focal loss:</p>
-    <div class="formula">FL(p_y) = −alpha[y] · (1 − p_y)^gamma · log(p_y)</div>
+    <div class="formula">FL(p_y) = −alpha[y] · (1 − p_y)^gamma[y] · log(p_y)</div>
     <p>γ = 0 recovers plain (alpha-weighted) cross-entropy; γ = 2 (the paper's
     default) down-weights already-confident samples by (1−p)² so the gradient
     concentrates on hard, misclassified examples — exactly the regime of a
     heavily imbalanced set where easy hard-negatives would otherwise drown the
     signal. Higher γ (3–5) focuses harder but can destabilize early training when
-    <em>everything</em> is misclassified.</p>
+    <em>everything</em> is misclassified. This value applies to every class;
+    <code>--hn-gamma</code> gives the hard-negative class its own exponent.</p>
   </div>
 
   <div class="arg" id="t-hn-alpha">
@@ -782,6 +783,43 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     toward 1.0 (directly, or via the ramp) to increase the cost of false accepts
     once recall is established. Values above 1 are legal and flip the emphasis
     entirely toward specificity.</p>
+  </div>
+
+  <div class="arg" id="t-hn-gamma">
+    <div class="arg-head"><span class="flag">--hn-gamma</span><span class="badge">float</span><span class="badge">default: = --focal-gamma</span></div>
+    <p>Asymmetric focusing: a separate γ for the <code>hard_negative</code>
+    class. When negatives outnumber positives by orders of magnitude, the sum
+    of many small easy-negative losses still dominates the gradient at a
+    symmetric γ, however small each term is; a larger exponent for negatives
+    discounts them much harder while positives keep a gentle exponent so
+    their gradient is never suppressed once they become "easy". The
+    asymmetric-loss paper's recipe is γ⁻ = 4 for negatives and γ⁺ = 0–1 for
+    positives: here <code>--focal-gamma 1 --hn-gamma 4</code>. Alpha
+    (<code>--hn-alpha</code>, the ramp, rescue) multiplies on top as before,
+    so the two knobs are independent: alpha scales every negative's loss by
+    a constant, gamma reshapes <em>which</em> negatives carry the
+    gradient.</p>
+  </div>
+
+  <div class="arg" id="t-hn-margin">
+    <div class="arg-head"><span class="flag">--hn-margin</span><span class="badge">float in [0, 1)</span><span class="badge">default: 0</span></div>
+    <p>The asymmetric loss's probability shift for negatives. A hard
+    negative's probability is moved to <code>min(p_y + m, 1)</code> before
+    the focal term, so a negative the model already rejects with genuineness
+    <code>s = 1 − p_y ≤ m</code> contributes exactly zero loss and zero
+    gradient — it is simply done, and training capacity goes to the
+    negatives that still look genuine, the ones that sit near the operating
+    threshold and decide specificity. Negatives above the margin are
+    down-weighted smoothly (their focal term sees <code>s − m</code>).
+    0.05–0.2 are typical; set it at or below the specificity you need
+    (a negative dropped at <code>s ≤ 0.1</code> is still well under any
+    threshold above 0.1). Genuine samples are never shifted.</p>
+    <div class="callout"><span class="tag">Interaction</span>
+    Mining scores (the sampler's difficulty, <code>1 − p</code> of the true
+    class) are computed from the raw probabilities, not the shifted ones, so
+    the margin changes what the loss ignores, not which negatives get drawn.
+    With both knobs, <code>--focal-gamma 1 --hn-gamma 4 --hn-margin 0.1</code>
+    is the "negatives far outweigh positives" starting point.</div>
   </div>
 
   <div class="arg" id="t-class-alpha">
