@@ -554,6 +554,31 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     are unchanged (no twin stored).</p>
   </div>
 
+  <div class="arg" id="t-freeze-epochs">
+    <div class="arg-head"><span class="flag">--freeze-epochs</span><span class="badge">int</span><span class="badge">default: 0</span></div>
+    <p>Linear probe, then fine-tune. For the first N epochs every parameter
+    except the classifier head is frozen: autograd skips the backbone's
+    backward pass entirely (a frozen epoch runs 2–3× faster — the forward
+    pass remains), while BatchNorm running statistics still adapt to the new
+    imagery. From epoch N the whole network trains as usual; the transition
+    is printed and recorded as <code>freeze</code> / <code>unfreeze</code>
+    in the metrics <code>event</code> column, and a resumed run recomputes
+    the state from the epoch index. The point beyond speed: a freshly
+    initialised head sends large, random gradients through pretrained
+    features during the first steps, and on a heavily skewed draw those
+    gradients are mostly "everything is a hard negative"; letting the head
+    settle first (the LP-FT recipe) keeps the features intact for the
+    fine-tuning that follows. 1–3 epochs is typical with pretrained
+    weights; the flag warns under <code>--no-pretrained</code>, where a
+    frozen backbone is random features.</p>
+    <div class="callout"><span class="tag">Interaction</span>
+    Smart-mode cycles and the pressure ramp count epochs as usual, so set
+    N below the first cycle length; <code>--warmup-epochs</code> still
+    applies to the head's learning rate. Frozen parameters carry no optimizer
+    state until they unfreeze, so a checkpoint from the frozen phase is
+    smaller.</div>
+  </div>
+
   <div class="arg" id="t-seed">
     <div class="arg-head"><span class="flag">--seed</span><span class="badge">int</span><span class="badge">default: 0</span></div>
     <p>Seeds Python, NumPy, and torch RNGs, and parameterizes the sampler: the
@@ -2123,7 +2148,7 @@ float32   0.0 – 1.0    already-scaled floats — 4x the disk/IO of uint8</div>
     <tr><td>ramp_progress</td><td>ramp steps completed (0…<code>--ramp-epochs</code>)</td></tr>
     <tr><td>pressure</td><td>smart mode: pressure level trained at this epoch (blank otherwise)</td></tr>
     <tr><td>cycle</td><td>smart mode: LR-cycle index (blank otherwise)</td></tr>
-    <tr><td>event</td><td>smart mode, boundary epochs only: raise / hold / rewind / ceiling</td></tr>
+    <tr><td>event</td><td>smart mode, boundary epochs only: raise / hold / rewind / ceiling; freeze / unfreeze mark the <code>--freeze-epochs</code> transitions</td></tr>
     <tr><td>lr</td><td>learning rate actually used this epoch (cosine-cycled in smart mode)</td></tr>
     <tr><td>epoch_time_s</td><td>wall-clock seconds for train + validate</td></tr>
   </table></div>

@@ -42,7 +42,7 @@ from dataset import (AUGMENTATIONS, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
 from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
-from model import ARCHS, build_model, init_classifier_prior
+from model import ARCHS, build_model, init_classifier_prior, set_backbone_trainable
 from sampler import HardNegativeMiner, ImbalanceCapSampler
 
 # --smart level presets: 1 = minimal/fast, 5 = marathon (slowly reach the
@@ -189,6 +189,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "store the EMA weights as model_state (what "
                         "evaluate/inference load) plus raw_model_state so "
                         "--resume continues the underlying training")
+    t.add_argument("--freeze-epochs", type=int, default=0, metavar="N",
+                   help="train only the classifier head for the first N "
+                        "epochs with the backbone frozen (BatchNorm "
+                        "statistics still adapt), then unfreeze everything: "
+                        "linear-probe-then-fine-tune. The frozen epochs skip "
+                        "the backbone's backward pass (2-3x faster) and let "
+                        "the head settle before imbalanced gradients reach "
+                        "the pretrained features")
     t.add_argument("--seed", type=int, default=0)
     t.add_argument("--device", default=None, help="cuda / cpu (default: auto)")
     t.add_argument("--workers", type=int, default=0, help="DataLoader workers")
@@ -1004,8 +1012,29 @@ def train(args, on_epoch_end=None) -> dict:
     epochs_since_best = 0
     improved_this_cycle = False
     stop = False
+    backbone_frozen = False  # a fresh model is fully trainable
+    if args.freeze_epochs > 0 and args.no_pretrained and not args.resume:
+        print("WARNING: --freeze-epochs with --no-pretrained trains the head on "
+              "random, untrained features for those epochs")
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
+        # linear probe: the head alone for the first --freeze-epochs. The
+        # state is recomputed from the epoch index (so --resume lands in
+        # the right phase) and the transition is logged relative to the
+        # epoch before - which a resumed run never ran in this process.
+        freeze_event = ""
+        want_frozen = epoch < args.freeze_epochs
+        if want_frozen != backbone_frozen:
+            set_backbone_trainable(model, not want_frozen)
+            backbone_frozen = want_frozen
+        prev_frozen = epoch > 0 and (epoch - 1) < args.freeze_epochs
+        if want_frozen != prev_frozen:
+            freeze_event = "freeze" if want_frozen else "unfreeze"
+            n_backbone = sum(p.numel() for n, p in model.named_parameters()
+                             if not n.startswith("fc."))
+            print(f"  epoch {epoch}: backbone "
+                  f"{'frozen - training the head only' if want_frozen else 'unfrozen - full fine-tuning'}"
+                  f" ({n_backbone / 1e6:.1f}M parameters)")
         if controller is not None:
             hn_alpha, ratio = pressure_values(args, controller.p_try,
                                               n_genuine, n_hn)
@@ -1122,7 +1151,8 @@ def train(args, on_epoch_end=None) -> dict:
             "auroc": f"{op['auroc']:.6f}", "hn_alpha": f"{hn_alpha:.4f}",
             "imbalance_ratio": ratio, "ramp_progress": ramp_progress,
             "pressure": p_used if p_used == "" else f"{p_used:.3f}",
-            "cycle": cycle_used, "event": event,
+            "cycle": cycle_used,
+            "event": " ".join(e for e in (freeze_event, event) if e),
             "lr": f"{lr:.3e}", "epoch_time_s": f"{dt:.1f}",
         })
         csv_file.flush()

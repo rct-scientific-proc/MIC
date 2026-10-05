@@ -99,6 +99,20 @@ def init_classifier_prior(model: nn.Module, class_counts) -> np.ndarray:
     return prior
 
 
+def set_backbone_trainable(model: nn.Module, trainable: bool) -> int:
+    """Freeze or unfreeze every parameter except the classifier head
+    (linear probing). Frozen parameters get no gradient, so autograd skips
+    the whole backbone's backward pass; BatchNorm running statistics still
+    update in train mode, adapting to the new imagery while the filters
+    stay pretrained. Returns the number of parameters toggled."""
+    n = 0
+    for name, p in model.named_parameters():
+        if not name.startswith("fc."):
+            p.requires_grad_(trainable)
+            n += p.numel()
+    return n
+
+
 def weight_url(arch: str) -> str:
     """Download URL of the pretrained weights used by build_model."""
     return ARCHS[arch][1].url
