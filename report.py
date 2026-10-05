@@ -422,7 +422,8 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
                             in_channels=best.get("in_channels", 3)).to(dev)
         model.load_state_dict(best["model_state"])
         ds = H5SnippetDataset(str(h5_path), split,
-                              imagenet_norm=best["imagenet_norm"])
+                              imagenet_norm=best["imagenet_norm"],
+                              input_size=best.get("input_size"))
         loader = DataLoader(ds, batch_size=64, pin_memory=dev.type == "cuda")
         probs, labels = collect_probs(model, loader, dev,
                                       desc="report inference",

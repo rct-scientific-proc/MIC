@@ -314,8 +314,27 @@ def main() -> None:
         b["classes"] = np.array(a["classes"].asstr()[:], dtype=object)
     run(REPO / "train.py", h5_f32, "--arch", "resnet18", "--no-pretrained",
         "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
+        "--input-size", "native",
         "--out-dir", OUT_ROOT / "run_f32", "--no-report", "--patience", "0",
         "--seed", "1", "--no-progress", *GPU_TRAIN)
+    # --input-size native: the checkpoint records the stored snippet size,
+    # and the dataset built for it carries no resize op
+    ck_f32 = torch.load(ck(OUT_ROOT / "run_f32", "best"), map_location="cpu",
+                        weights_only=False)
+    assert ck_f32["input_size"] == [128, 128], ck_f32.get("input_size")
+    from dataset import H5SnippetDataset as _DS
+    from torchvision.transforms import v2 as _v2
+    _ds = _DS(str(h5_f32), 0, input_size=ck_f32["input_size"])
+    assert not any(isinstance(t, _v2.Resize) for t in _ds.transform.transforms), \
+        "native input size still resizes"
+    assert tuple(_ds[0][0].shape) == (3, 128, 128), _ds[0][0].shape
+    bad = subprocess.run([sys.executable, str(REPO / "train.py"), str(h5_f32),
+                          "--epochs", "1", "--input-size", "16",
+                          "--out-dir", str(OUT_ROOT / "run_f32_bad"),
+                          "--no-report", "--no-progress"],
+                         cwd=REPO, capture_output=True, text=True)
+    assert bad.returncode != 0 and "at least 32" in bad.stderr, \
+        "--input-size 16 accepted"
     run(REPO / "optimize_h5.py", h5_f32, OUT_ROOT / "smoke_f32_opt.h5",
         "--no-progress")
     with h5py.File(OUT_ROOT / "smoke_f32_opt.h5", "r") as f, \
@@ -346,13 +365,14 @@ def main() -> None:
     run(REPO / "train.py", h5_2ch, "--arch", "resnet18", "--no-pretrained",
         "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
         "--augment", "rotation:p=0.5,degrees=10", "gaussianblur",
-        "--display-channel", "1",
+        "--display-channel", "1", "--input-size", "96",
         "--out-dir", out_2ch, "--no-report", "--patience", "0",
         "--seed", "1", "--no-progress", *GPU_TRAIN)
     ck_2ch = torch.load(ck(out_2ch, "best"), map_location="cpu",
                         weights_only=False)
     assert ck_2ch["in_channels"] == 2, ck_2ch.get("in_channels")
     assert ck_2ch["display_channel"] == 1, ck_2ch.get("display_channel")
+    assert ck_2ch["input_size"] == [96, 96], ck_2ch.get("input_size")
     from dataset import to_display_uint8
     assert to_display_uint8(np.zeros((4, 4, 2), np.uint8), channel=1).shape == (4, 4, 1)
     assert tuple(ck_2ch["model_state"]["conv1.weight"].shape) == (64, 2, 7, 7)

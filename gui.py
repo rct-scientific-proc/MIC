@@ -148,6 +148,9 @@ if QtWidgets is not None:
             self.arch = self.add("arch", "architecture",
                                  _combo("(default: resnet18)", "resnet18",
                                         "resnet34", "resnet50"))
+            self.input_size = self.add("input_size", "input size",
+                                       _edit("default: 224 - N, HxW, or native "
+                                             "(the stored snippet size)"))
             self.epochs = self.add("epochs", "epochs",
                                    _edit("default: 50, or per smart level"))
             self.batch = self.add("batch", "batch size", _edit("default: 64"))
@@ -180,6 +183,7 @@ if QtWidgets is not None:
             self.opt(a, "--config", self.config.text())
             self.opt(a, "--out-dir", self.out.text())
             self.combo_opt(a, "--arch", self.arch)
+            self.opt(a, "--input-size", self.input_size.text().strip())
             self.opt(a, "--epochs", self.epochs.text().strip())
             self.opt(a, "--batch-size", self.batch.text().strip())
             self.opt(a, "--lr", self.lr.text().strip())

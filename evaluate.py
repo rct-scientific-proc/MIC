@@ -99,7 +99,8 @@ def main(argv=None) -> None:
                         in_channels=ckpt.get("in_channels", 3)).to(device)
     model.load_state_dict(ckpt["model_state"])
 
-    ds = H5SnippetDataset(args.h5, args.split, imagenet_norm=ckpt["imagenet_norm"])
+    ds = H5SnippetDataset(args.h5, args.split, imagenet_norm=ckpt["imagenet_norm"],
+                          input_size=ckpt.get("input_size"))
     loader = DataLoader(ds, batch_size=args.batch_size, num_workers=args.workers,
                         pin_memory=device.type == "cuda")
 

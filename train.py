@@ -38,7 +38,7 @@ from checkpoints import (atomic_save, checkpoint_name, find_checkpoint,
 from controller import SmartController
 from dataset import (AUGMENTATIONS, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
                      load_augmentation_plugins, model_channels,
-                     set_display_channel, validate_h5)
+                     parse_input_size, set_display_channel, validate_h5)
 from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
@@ -135,6 +135,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="random init instead of ImageNet weights")
     m.add_argument("--weights-path", default=None,
                    help="local ImageNet .pth (from download_weights.py) for offline use")
+    m.add_argument("--input-size", default=None, metavar="N|HxW|native",
+                   help="pixel size the model consumes. Default 224: every "
+                        "snippet is resized to 224x224, the ImageNet regime "
+                        "the pretrained features were learned at. An "
+                        "integer N trains at NxN, HxW at that shape, and "
+                        "'native' at the stored snippet size with no resize "
+                        "at all - 3-12x less compute per sample for 64-128 "
+                        "px snippets, at some cost in pretrained-feature "
+                        "fit. Recorded in the checkpoint as input_size and "
+                        "replayed by evaluate, report, and inference")
 
     t = p.add_argument_group("training")
     t.add_argument("--epochs", type=int, default=None,
@@ -740,7 +750,8 @@ def selection_key(op: dict) -> tuple:
 
 def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classes,
                     hn_index, op, best_key, miner=None, ramp_progress=0,
-                    controller=None, ema_model=None, in_channels=3) -> None:
+                    controller=None, ema_model=None, in_channels=3,
+                    input_size=None) -> None:
     # model_state is always the DEPLOYED weights (the EMA twin when --ema is
     # on); raw_model_state keeps the underlying training weights for resume
     deploy = ema_model.module if ema_model is not None else model
@@ -755,6 +766,7 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
         "scaler_state": scaler.state_dict(),
         "epoch": epoch,
         "in_channels": in_channels,
+        "input_size": list(input_size) if input_size is not None else [224, 224],
         "display_channel": args.display_channel,
         "config": vars(args),
         "classes": classes,
@@ -814,15 +826,24 @@ def train(args, on_epoch_end=None) -> dict:
         print(f"  {split_name}: {c['genuine']} genuine, {c['hard_negative']} hard negatives")
     in_channels = model_channels(summary["channels"])
     set_display_channel(args.display_channel, summary["channels"])  # fail early
+    try:
+        input_hw = parse_input_size(args.input_size, summary["image_hw"])
+    except ValueError as e:
+        raise SystemExit(str(e))
     print(f"  images: {summary['channels']}-channel {summary['dtype']} -> "
           f"{in_channels}-channel model input"
           + (" (first convolution rebuilt for this band count)"
              if in_channels != 3 else ""))
+    sh, sw = summary["image_hw"]
+    print(f"  input size: {input_hw[0]}x{input_hw[1]}"
+          + (" native (no resize)" if tuple(input_hw) == (sh, sw)
+             else f" (resized from {sh}x{sw} snippets)"))
 
     train_ds = H5SnippetDataset(args.h5, SPLIT_TRAIN,
                                 imagenet_norm=args.imagenet_norm,
-                                augment=args.augment)
-    val_ds = H5SnippetDataset(args.h5, SPLIT_VAL, imagenet_norm=args.imagenet_norm)
+                                augment=args.augment, input_size=input_hw)
+    val_ds = H5SnippetDataset(args.h5, SPLIT_VAL, imagenet_norm=args.imagenet_norm,
+                              input_size=input_hw)
     if args.augment:
         print("augmentations (train split only):",
               ", ".join(str(a) for a in args.augment))
@@ -997,7 +1018,8 @@ def train(args, on_epoch_end=None) -> dict:
                        epoch=epoch, args=args, classes=classes,
                        hn_index=hn_index, op=op, miner=miner,
                        ramp_progress=ramp_progress, controller=controller,
-                       ema_model=ema_model, in_channels=in_channels)
+                       ema_model=ema_model, in_channels=in_channels,
+                            input_size=input_hw)
         if controller is not None:
             improved_this_cycle = improved_this_cycle or improved
             if controller.observe(key):
@@ -1113,7 +1135,8 @@ def train(args, on_epoch_end=None) -> dict:
                             op=op_for_last, miner=miner,
                             ramp_progress=ramp_progress,
                             controller=controller, best_key=best_key,
-                            ema_model=ema_model, in_channels=in_channels)
+                            ema_model=ema_model, in_channels=in_channels,
+                            input_size=input_hw)
             prune_role(out_dir, "last", last_path)
 
         if on_epoch_end is not None and on_epoch_end(epoch, op):

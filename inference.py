@@ -39,8 +39,8 @@ from torchmetrics.functional.classification import binary_auroc, binary_roc
 from tqdm import tqdm
 
 from checkpoints import find_checkpoint, load_checkpoint, utc_stamp
-from dataset import (build_transform, set_display_channel, to_display_uint8,
-                     to_model_input)
+from dataset import (RESNET_INPUT_SIZE, build_transform, set_display_channel,
+                     to_display_uint8, to_model_input)
 from metrics import _per_sample_thresholds, genuineness_scores, non_hn_argmax
 from model import build_model
 from plots import (SERIES, plot_confusion_grid, plot_per_class_rocs,
@@ -72,7 +72,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--recursive", "-r", action="store_true",
                    help="scan the given directories recursively instead of "
                         "top-level only")
-    p.add_argument("--window-width", type=int, required=True)
+    p.add_argument("--window-width", type=int, required=True,
+                   help="sub-window size in source pixels; windows are "
+                        "resized to the checkpoint's input_size (224x224 "
+                        "unless trained with --input-size) or fed as-is "
+                        "when they already match it")
     p.add_argument("--window-height", type=int, required=True)
     p.add_argument("--stride-x", type=int, required=True)
     p.add_argument("--stride-y", type=int, default=None,
@@ -225,7 +229,7 @@ def window_positions(size: int, window: int, stride: int) -> list[int]:
 
 
 @torch.no_grad()
-def infer_image(img: np.ndarray, model, transform, device, args,
+def infer_image(img: np.ndarray, model, prep, device, args,
                 desc: str) -> tuple[list[tuple], np.ndarray, int, int]:
     """Slide over one image (HWC, model-input scale: uint8, or float32 in
     [0,1] for 16-bit/float multi-band scenes); returns (coords, probs, w, h) for
@@ -237,10 +241,15 @@ def infer_image(img: np.ndarray, model, transform, device, args,
     non-blocking transfer (~12x less PCIe traffic than fp32 224x224) and the
     resize/scale/normalize transform runs batched on the device; the forward
     pass runs under autocast on CUDA. Probabilities are computed in fp32.
+    prep = (imagenet_norm, input_hw) from the checkpoint; the transform is
+    built per image so windows already at the model's input size skip the
+    resize op (edge images clamp the window, so the size can vary).
     """
     ih, iw = img.shape[:2]
     w = min(args.window_width, iw)
     h = min(args.window_height, ih)
+    imagenet_norm, input_hw = prep
+    transform = build_transform(imagenet_norm, input_hw, source_hw=(h, w))
     coords = [(x, y) for y in window_positions(ih, h, args.stride_y)
               for x in window_positions(iw, w, args.stride_x)]  # row-major
     use_cuda = device.type == "cuda"
@@ -1032,7 +1041,13 @@ def main(argv=None) -> None:
                         in_channels=in_channels).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
-    transform = build_transform(ckpt["imagenet_norm"])
+    input_hw = tuple(int(v) for v in (ckpt.get("input_size")
+                                      or (RESNET_INPUT_SIZE, RESNET_INPUT_SIZE)))
+    prep = (ckpt["imagenet_norm"], input_hw)
+    native = (args.window_height, args.window_width) == input_hw
+    print(f"model input {input_hw[0]}x{input_hw[1]}; windows "
+          f"{args.window_width}x{args.window_height}"
+          + (" fed natively (no resize)" if native else " resized to it"))
 
     out_dir = Path(args.out_dir or f"inference_{utc_stamp()}")
     assets = out_dir / "assets"
@@ -1044,7 +1059,7 @@ def main(argv=None) -> None:
     results = []
     for path in gather_images(args.images, args.recursive):
         img = read_scene(path, in_channels, args.grayscale)
-        coords, probs, w, h = infer_image(img, model, transform, device,
+        coords, probs, w, h = infer_image(img, model, prep, device,
                                           args, desc=path.name)
         detections = detections_from(coords, probs, w, h, hn_index, operating)
         r = {"path": path, "size": (img.shape[1], img.shape[0]),

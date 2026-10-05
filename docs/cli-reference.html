@@ -336,8 +336,8 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
 
   <div class="arg" id="t-arch">
     <div class="arg-head"><span class="flag">--arch</span><span class="badge">resnet18 | resnet34 | resnet50</span><span class="badge">default: resnet18</span></div>
-    <p>Backbone size. All three take the same 3×224×224 input and get a fresh
-    K-class linear head. resnet18/34 (11.7M / 21.8M params) are usually enough for
+    <p>Backbone size. All three take the same input (3×224×224 by default; see
+    <code>--input-size</code>) and get a fresh K-class linear head. resnet18/34 (11.7M / 21.8M params) are usually enough for
     snippet-scale imagery and train markedly faster; resnet50 (25.6M, bottleneck
     blocks) buys capacity when classes differ in fine texture rather than gross
     shape. The architecture is recorded in the checkpoint, so
@@ -369,6 +369,52 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     Takes precedence over the cache; ignored if <code>--no-pretrained</code> is set.</p>
   </div>
 
+  <div class="arg" id="t-input-size">
+    <div class="arg-head"><span class="flag">--input-size</span><span class="badge">N | HxW | native</span><span class="badge">default: 224</span></div>
+    <p>The pixel size the model consumes. By default every snippet is resized
+    to 224×224 — the scale the ImageNet weights were learned at — whatever
+    its stored size. An integer trains at N×N, <code>HxW</code> at that shape,
+    and <code>native</code> at the stored snippet size with <strong>no resize
+    op at all</strong>: the crop goes from the file to the network untouched.
+    The resolved size is recorded in the checkpoint as
+    <code>input_size</code> (<code>[height, width]</code>) and replayed by
+    <code>evaluate.py</code>, <code>report.py</code>, and
+    <code>inference.py</code> — which resizes every sliding window to it, or
+    feeds windows as-is when <code>--window-width/height</code> already match
+    — so a shipped model is never fed a scale it was not trained at, and a
+    consumer only has to read that one field.</p>
+    <p>Why it matters: GeoLabeller's default snippet is 64×64, so the default
+    path upsamples each one 12× before the network sees it, and both the
+    compute and the per-sample CPU resize grow with the pixel count. Measured
+    training-step rates (RTX 4070, AMP, batch 64, 64 px uint8 snippets):</p>
+    <div class="table-wrap"><table>
+      <tr><th>input</th><th>resnet18</th><th>resnet34</th><th>resnet50</th></tr>
+      <tr><td>224 (default)</td><td>1,600 samples/s</td><td>970</td><td>580</td></tr>
+      <tr><td>160</td><td>2,660</td><td>1,600</td><td>—</td></tr>
+      <tr><td>128</td><td>3,680</td><td>2,170</td><td>1,390</td></tr>
+      <tr><td>96</td><td>4,560</td><td>2,670</td><td>—</td></tr>
+      <tr><td>64 (native)</td><td>4,940</td><td>2,850</td><td>—</td></tr>
+    </table></div>
+    <p>The data path delivered ~2,000 samples/s through the default CPU
+    resize (with or without workers — the 224² float tensors are what cost)
+    and ~10,000 samples/s of raw 64 px crops, so at the default size loader
+    and GPU are about even, while a native-size run is GPU-bound and about
+    3× faster per epoch. The trade-off is pretrained-feature fit: ImageNet
+    filters expect objects at ImageNet scale, and a 64 px input leaves a
+    2×2 map at the last stage (128 → 4×4, 224 → 7×7), so very small inputs
+    can cost specificity on fine-texture classes. 128 is a good first try
+    (~2.3× faster); compare specificity at the target recall against a
+    224 run on your own data before committing. From random init
+    (<code>--no-pretrained</code>) there is no fit to lose and native is the
+    natural choice.</p>
+    <div class="callout"><span class="tag">Interaction</span>
+    A different input size is a different model: thresholds, calibration
+    and the report's snippets all follow it, and <code>--resume</code> keeps
+    the size recorded in the run's config. <code>optimize_h5.py --resize
+    N</code> remains the way to shrink <em>oversized</em> sources once, on
+    disk, instead of per sample at load time.</div>
+  </div>
+
   <h3>Training group</h3>
 
   <div class="arg" id="t-epochs">
@@ -382,8 +428,8 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
   <div class="arg" id="t-batch-size">
     <div class="arg-head"><span class="flag">--batch-size</span><span class="badge">int</span><span class="badge">default: 64</span></div>
     <p>Used for both training and validation loaders. Images are 3×224×224 floats
-    after the input pipeline, so memory scales as ~0.6&nbsp;MB per sample before
-    activations; drop this first if CUDA runs out of memory, or raise it with
+    after the input pipeline (less with <code>--input-size</code>), so memory
+    scales as ~0.6&nbsp;MB per sample before activations; drop this first if CUDA runs out of memory, or raise it with
     <code>--amp</code> on. Batch size also sets how many samples share one BatchNorm
     statistic — very small values (&lt;16) make BN noisy on top of the class-mix
     noise inherent to imbalanced sampling.</p>
@@ -1128,7 +1174,9 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   <div class="arg" id="t-imagenet-norm">
     <div class="arg-head"><span class="flag">--imagenet-norm</span><span class="badge">switch</span><span class="badge">default: off</span></div>
     <p>Input pipeline, always: uint8 HWC → CHW tensor → bilinear resize to
-    224×224 (antialiased) → scale to [0,1]; grayscale is repeated to 3 channels.
+    the model input size (224×224 unless <code>--input-size</code> says
+    otherwise; skipped when the stored size already matches) → scale to
+    [0,1]; grayscale is repeated to 3 channels.
     With this flag, ImageNet channel statistics
     (mean 0.485/0.456/0.406, std 0.229/0.224/0.225) are additionally applied —
     matching what the pretrained backbone saw during ImageNet training, which
@@ -1252,7 +1300,8 @@ POST_RESIZE     optional: set of names that run AFTER resize/normalize</div>
                           uint16 / float16 / float32 files (uint16 arrives
                           divided by 65535). 1 channel for grayscale, else
                           3; return the SAME dtype and layout
-post-resize (POST_RESIZE) CHW float32, 224x224, scaled to [0,1] —
+post-resize (POST_RESIZE) CHW float32 at the model input size (224x224
+                          by default), scaled to [0,1] —
                           ImageNet-normalized when --imagenet-norm is on;
                           use it when the effect must be consistent at
                           model scale (the built-in erasing lives here)</div>
@@ -1443,9 +1492,11 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
 
   <div class="arg" id="i-window">
     <div class="arg-head"><span class="flag">--window-width / --window-height</span><span class="badge">int · required</span></div>
-    <p>Sub-window size in source pixels. Each window is resized to the model's
-    224x224 input, so choose the size that makes a target fill the window the
-    way training snippets did. Windows larger than the image are clamped to
+    <p>Sub-window size in source pixels. Each window is resized to the
+    checkpoint's <code>input_size</code> (224×224 unless the model was trained
+    with <code>--input-size</code>) — or fed as-is when it already matches,
+    the fastest path — so choose the size that makes a target fill the window
+    the way training snippets did; the run's first line prints both sizes. Windows larger than the image are clamped to
     the image size.</p>
   </div>
 
@@ -1850,7 +1901,8 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
   <div class="arg" id="s-size">
     <div class="arg-head"><span class="flag">--size</span><span class="badge">int</span><span class="badge">default: 28</span></div>
     <p>Image height and width. Kept small on purpose — the input pipeline resizes
-    to 224 anyway, and small sources keep the file and the test fast.</p>
+    to the model input size anyway (224 by default), and small sources keep
+    the file and the test fast.</p>
   </div>
 
   <div class="arg" id="s-channels">
@@ -1958,12 +2010,14 @@ float32   0.0 – 1.0    already-scaled floats — 4x the disk/IO of uint8</div>
   (written with per-image chunks so reads stay sane).</p>
   <p><code>--resize N</code> optionally resizes every image to NxN (batched
   through the GPU when available). Worthwhile when sources are
-  <em>larger</em> than the target — the file shrinks and training/evaluation
-  skip their resize op for files already at model size. When sources are
-  smaller, pre-resizing inflates the data by the square of the scale factor
-  (32px to 224px is 49x); the script warns before doing it — for small
-  sources keep the native size and let training resize
-  (<code>--workers</code> parallelizes it).</p>
+  <em>larger</em> than the size you train at — the file shrinks and
+  training/evaluation skip their resize op whenever the stored size matches
+  <code>--input-size</code> (224 by default). When sources are smaller,
+  pre-resizing inflates the data by the square of the scale factor (32px to
+  224px is 49x); the script warns before doing it — for small sources keep
+  the native size and either let training resize (<code>--workers</code>
+  parallelizes it) or train at that size with <code>--input-size
+  native</code>.</p>
   <p><code>--sort-split</code> groups the output rows by split
   (train | validate | test) so each split is one contiguous region.
   Random per-sample training reads never become sequential — the sampler
@@ -2068,7 +2122,9 @@ last_e0051_rec0.8824_spec1.0000_20260819T153055Z.pt</div>
   <p>Both <code>last.pt</code> and <code>best.pt</code> store: model weights, optimizer
   and AMP-scaler state, epoch index, the full CLI config, the class list and
   hard-negative index, the input channel count (<code>in_channels</code>, so a
-  2-band model rebuilds with the right stem), the <code>--imagenet-norm</code>
+  2-band model rebuilds with the right stem), the input size
+  (<code>input_size</code>, <code>[height, width]</code>, so every consumer
+  feeds the scale the model was trained at), the <code>--imagenet-norm</code>
   flag, <strong>the operating
   threshold(s)</strong> — the global scalar plus, in per-class mode, the
   {class: threshold} map and the floor — that epoch's validation metrics, the

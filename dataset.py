@@ -46,6 +46,38 @@ def to_model_input(arr: np.ndarray) -> np.ndarray:
     return arr.astype(np.float32, copy=False)
 
 
+def parse_input_size(spec, source_hw) -> tuple[int, int]:
+    """--input-size -> the (H, W) the model consumes. None or an integer N
+    (also as text) means NxN, 'HxW' sets both sides, and 'native' is the
+    stored snippet size itself, so no resize ever runs. A ResNet's five
+    stride-2 stages need at least 32 pixels a side."""
+    if spec is None:
+        return (RESNET_INPUT_SIZE, RESNET_INPUT_SIZE)
+    if isinstance(spec, (tuple, list)):
+        h, w = spec
+        hw = (int(h), int(w))
+    else:
+        text = str(spec).strip().lower()
+        if text == "native":
+            hw = (int(source_hw[0]), int(source_hw[1]))
+        else:
+            parts = text.split("x")
+            try:
+                if len(parts) == 1:
+                    hw = (int(parts[0]), int(parts[0]))
+                elif len(parts) == 2:
+                    hw = (int(parts[0]), int(parts[1]))
+                else:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(f"--input-size must be an integer, HxW, or "
+                                 f"'native', got '{spec}'") from None
+    if min(hw) < 32:
+        raise ValueError(f"--input-size {spec}: a ResNet needs at least 32 "
+                         "pixels a side (five stride-2 stages)")
+    return hw
+
+
 def model_channels(stored: int) -> int:
     """Input channels the backbone is built for. A 1-channel file is
     replicated to 3 (lossless, keeps the full pretrained RGB kernel), 3 is
@@ -297,17 +329,23 @@ def build_augmentation(specs) -> tuple[v2.Compose | None, v2.Compose | None]:
             v2.Compose(post) if post else None)
 
 
-def build_transform(imagenet_norm: bool, resize: bool = True) -> v2.Compose:
-    """The model input pipeline: CHW uint8 -> resize 224 -> float [0,1] ->
-    optional ImageNet normalization. Shared by training, evaluation, and
-    sliding-window inference so preprocessing can never diverge.
+def build_transform(imagenet_norm: bool, input_hw=None,
+                    source_hw=None) -> v2.Compose:
+    """The model input pipeline: CHW uint8 -> resize to the model input
+    size -> float [0,1] -> optional ImageNet normalization. Shared by
+    training, evaluation, and sliding-window inference so preprocessing
+    can never diverge.
 
-    resize=False skips the resize op for sources already at model size
-    (e.g. files pre-resized by optimize_h5.py)."""
+    input_hw is the (H, W) the model consumes (a checkpoint's input_size;
+    224x224 when None). When source_hw - the size of the incoming crops -
+    already equals it, the resize op is left out entirely, so native-size
+    snippets are never interpolated."""
+    input_hw = tuple(int(v) for v in
+                     (input_hw or (RESNET_INPUT_SIZE, RESNET_INPUT_SIZE)))
     ops = []
-    if resize:
+    if source_hw is None or tuple(int(v) for v in source_hw) != input_hw:
         ops.append(v2.Resize(
-            (RESNET_INPUT_SIZE, RESNET_INPUT_SIZE),
+            input_hw,
             interpolation=v2.InterpolationMode.BILINEAR,
             antialias=True,
         ))
@@ -341,6 +379,7 @@ def validate_h5(path: str) -> dict:
                 f"got shape {f['images'].shape}"
             )
         channels = int(f["images"].shape[3])
+        image_hw = (int(f["images"].shape[1]), int(f["images"].shape[2]))
 
         dt = f["images"].dtype
         if dt.name not in IMAGE_DTYPES:
@@ -395,7 +434,7 @@ def validate_h5(path: str) -> dict:
 
     return {"classes": list(classes), "hard_negative_index": hn_index,
             "counts": counts, "dtype": dt.name, "channels": channels,
-            "in_channels": model_channels(channels)}
+            "in_channels": model_channels(channels), "image_hw": image_hw}
 
 
 class H5SnippetDataset(Dataset):
@@ -405,12 +444,14 @@ class H5SnippetDataset(Dataset):
     within this split — used by the mining tracker to attribute per-sample
     errors back to dataset entries.
 
-    Transform pipeline: uint8 HWC -> CHW tensor -> resize 224 -> float [0,1]
-    -> optional ImageNet normalization. Grayscale is repeated to 3 channels.
+    Transform pipeline: uint8 HWC -> CHW tensor -> resize to the model
+    input size (input_size: an int, HxW, 'native', or None = 224) -> float
+    [0,1] -> optional ImageNet normalization. Grayscale is repeated to 3
+    channels.
     """
 
     def __init__(self, h5_path: str, split: int, imagenet_norm: bool = False,
-                 augment=None):
+                 augment=None, input_size=None):
         if split not in SPLIT_NAMES:
             raise ValueError(f"split must be one of {list(SPLIT_NAMES)}, got {split}")
         self.h5_path = h5_path
@@ -456,11 +497,12 @@ class H5SnippetDataset(Dataset):
         self.hard_negative_index = len(self.classes) - 1
         self.num_classes = len(self.classes)
 
-        # sources already at model size (e.g. pre-resized by optimize_h5.py)
-        # skip the redundant resize op
-        self.transform = build_transform(
-            imagenet_norm,
-            resize=src_hw != (RESNET_INPUT_SIZE, RESNET_INPUT_SIZE))
+        # The resize op is skipped whenever the stored size already matches
+        # the model input (--input-size native, or a file pre-resized by
+        # optimize_h5.py), so such snippets are never interpolated.
+        self.source_hw = src_hw
+        self.input_hw = parse_input_size(input_size, src_hw)
+        self.transform = build_transform(imagenet_norm, self.input_hw, src_hw)
 
     def __len__(self) -> int:
         return len(self.indices)

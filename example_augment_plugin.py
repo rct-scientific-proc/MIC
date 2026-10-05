@@ -25,7 +25,7 @@ The contract (identical to the built-in catalog in dataset.py):
           dataset; return the same dtype and layout. Handle both scales
           (see GaussianNoise below) unless your files are always uint8.
         * post-resize (names listed in POST_RESIZE): the model-scale
-          float tensor - 224x224, scaled to [0,1] and ImageNet-normalized
+          float tensor - at the model input size (224x224 by default), scaled to [0,1] and ImageNet-normalized
           when --imagenet-norm is on. Use this stage when the effect
           should be consistent at model scale (see the built-in erasing).
 

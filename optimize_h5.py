@@ -11,11 +11,11 @@ matters more than read speed (written with per-image chunks so reads stay
 sane). Labels/gt/split/classes are copied verbatim; the output is
 validated and a measured random-read throughput comparison is printed.
 
-Optional --resize N additionally resizes every image to NxN (the model
-input size is 224), batched through the GPU when available. Worthwhile
-when sources are LARGER than the target (the file shrinks and the
-per-sample CPU resize disappears — training skips its resize op for files
-already at model size). When sources are smaller, pre-resizing inflates
+Optional --resize N additionally resizes every image to NxN (224 unless
+you train with --input-size), batched through the GPU when available.
+Worthwhile when sources are LARGER than the size you train at (the file
+shrinks and the per-sample CPU resize disappears — training skips its
+resize op whenever the stored size matches its input size). When sources are smaller, pre-resizing inflates
 the file by the square of the scale factor (32px -> 224px is 49x) and can
 push it past the training RAM cache — the script warns before doing it.
 
@@ -44,9 +44,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("input", help="source .h5 (h5_format.md layout)")
     p.add_argument("output", help="optimized .h5 to write")
     p.add_argument("--resize", type=int, default=None, metavar="N",
-                   help=f"resize images to NxN (model input is "
-                        f"{RESNET_INPUT_SIZE}); optional — omit to repack "
-                        "only")
+                   help=f"resize images to NxN (the default model input is "
+                        f"{RESNET_INPUT_SIZE}; train.py --input-size N or "
+                        "native then skips its own resize); optional — omit "
+                        "to repack only")
     p.add_argument("--compression", choices=("none", "gzip", "lzf"),
                    default="none",
                    help="default none: contiguous unchunked images, direct "
