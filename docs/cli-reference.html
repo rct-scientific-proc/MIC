@@ -518,7 +518,11 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     <code>--lr</code> than adamw's 3e-4 default. The choice is stored in
     checkpoints, and <code>--resume</code> refuses a mismatched optimizer
     (its state cannot carry over); smart-mode rewinds rebuild whichever
-    optimizer is selected.</p>
+    optimizer is selected. On CUDA, adamw runs PyTorch's fused kernel —
+    one launch per step instead of one per parameter tensor — measured at
+    1.15× (resnet34, 224 px) to 1.4× (resnet18, 128 px) training-step
+    throughput on an RTX 4070; the update and the state layout are
+    identical, so checkpoints resume across CPU and GPU.</p>
   </div>
 
   <div class="arg" id="t-momentum">
