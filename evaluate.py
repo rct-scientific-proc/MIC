@@ -31,8 +31,10 @@ from torch.utils.data import DataLoader
 
 from checkpoints import find_checkpoint, load_checkpoint
 from dataset import SPLIT_NAMES, SPLIT_TEST, H5SnippetDataset, validate_h5
+from losses import confidence_weights
 from metrics import (apply_threshold, calibration_bins, collect_probs,
-                     final_prediction, genuine_vs_hn_roc, per_class_ovr_roc)
+                     final_prediction, genuine_vs_hn_roc, per_class_ovr_roc,
+                     recall_by_confidence)
 from model import build_model, to_device
 from plots import (plot_calibration, plot_confusion, plot_genuine_vs_hn_roc,
                    plot_history, plot_per_class_rocs)
@@ -109,10 +111,26 @@ def main(argv=None) -> None:
     loader = DataLoader(ds, batch_size=args.batch_size, num_workers=args.workers,
                         pin_memory=device.type == "cuda")
 
+    # the run's view of the labels: when training weighted validation
+    # recall by confidence, so does this evaluation (same mapping, this
+    # split's ratings); the file must carry the column for that
+    cw = ckpt.get("confidence_weighting")
+    sample_w = None
+    weight_note = None
+    if cw and cw.get("validation"):
+        if ds.confidence is not None:
+            sample_w = confidence_weights(ds.confidence, ds.labels, hn_index,
+                                          cw["min"], cw["curve"])
+        else:
+            weight_note = (f"note: the checkpoint weighted recall by confidence "
+                           f"({cw['curve']}, min {cw['min']:g}) but {args.h5} has "
+                           "no 'confidence' column - recall here is unweighted")
+
     probs, labels = collect_probs(model, loader, device,
                                   desc=f"evaluate {split_name}",
                                   progress=not args.no_progress)
-    res = apply_threshold(probs, labels, hn_index, operating, agg=recall_agg)
+    res = apply_threshold(probs, labels, hn_index, operating, agg=recall_agg,
+                          sample_weight=sample_w)
     pred = final_prediction(probs, hn_index, operating)
     cm = confusion_matrix(labels, pred, len(classes))
 
@@ -130,7 +148,9 @@ def main(argv=None) -> None:
         f"dataset    : {args.h5}  split={split_name}  n={len(ds)}",
         thr_line,
         f"min-threshold floor            : {min_threshold:.4f}",
-        f"{recall_agg} recall (genuine classes) : {res['recall']:.4f}",
+        f"{recall_agg} recall (genuine classes) : {res['recall']:.4f}"
+        + (f"  [confidence-weighted: {cw['curve']}, min {cw['min']:g}]"
+           if sample_w is not None else ""),
         f"HN specificity at threshold    : {res['specificity']:.4f}",
         f"genuine acceptance rate (TPR)  : {res['tpr']:.4f}",
         "per-class recall / threshold:",
@@ -140,6 +160,19 @@ def main(argv=None) -> None:
         note = "  [global fallback]" if per_class and c in fallback_set else ""
         lines.append(f"  {classes[c]:<20s} {r:.4f}  thr {thr_c:.4f}   "
                      f"(n={int((labels == c).sum())}){note}")
+    if weight_note:
+        lines.append(weight_note)
+    if ds.confidence is not None:
+        # the labels-or-model diagnostic: recall per labeller rating
+        lines.append("recall by confidence rating (genuine chips; 0 = unrated):")
+        for row in recall_by_confidence(labels, pred, ds.confidence, hn_index):
+            w_txt = ""
+            if sample_w is not None:
+                w_r = confidence_weights(np.array([row["rating"]]), np.array([0]),
+                                         hn_index, cw["min"], cw["curve"])[0]
+                w_txt = f"   weight {w_r:.2f}"
+            lines.append(f"  rating {row['rating']}: {row['recalled']}/{row['n']} = "
+                         f"{row['recall']:.4f}{w_txt}")
 
     # A class still boosted at the checkpoint never stabilized on its own —
     # the reweighting has hit its limit; that class likely needs more data.

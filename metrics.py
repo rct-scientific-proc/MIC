@@ -47,6 +47,8 @@ import torch
 from torchmetrics.functional.classification import binary_auroc, binary_roc
 from tqdm import tqdm
 
+from dataset import CONFIDENCE_MAX, CONFIDENCE_UNRATED
+
 
 @torch.no_grad()
 def collect_probs(model, loader, device, desc: str | None = None,
@@ -105,6 +107,29 @@ def non_hn_argmax(probs: np.ndarray, hn_index: int) -> np.ndarray:
     return non_hn[np.argmax(probs[:, non_hn], axis=1)]
 
 
+def _weights(sample_weight, n: int) -> np.ndarray:
+    """Per-sample recall weights: ones when None (every chip counts once),
+    else the given array - --confidence-weight reaching into validation,
+    where a doubted label counts for less. Hard negatives always weigh 1
+    there, so specificity is never affected."""
+    if sample_weight is None:
+        return np.ones(n, dtype=np.float64)
+    w = np.asarray(sample_weight, dtype=np.float64)
+    if w.shape != (n,):
+        raise ValueError(f"sample_weight has shape {w.shape}, expected ({n},)")
+    if (w < 0).any():
+        raise ValueError("sample_weight must be non-negative")
+    return w
+
+
+def _weighted_class_ids(labels: np.ndarray, genuine: np.ndarray,
+                        w: np.ndarray) -> list[int]:
+    """Genuine classes present in the split with positive total weight. A
+    class whose chips all weigh 0 drops out of the aggregate, exactly as a
+    class absent from the split does."""
+    return [int(c) for c in np.unique(labels[genuine]) if w[labels == c].sum() > 0]
+
+
 def _per_sample_thresholds(threshold, pred: np.ndarray, num_classes: int):
     """Resolve a scalar or {class: t} threshold to one value per sample
     (per-class thresholds apply the PREDICTED class's threshold)."""
@@ -154,6 +179,7 @@ def sweep_threshold(
     target_recall: float,
     agg: str = "macro",
     min_threshold: float = 0.0,
+    sample_weight: "np.ndarray | None" = None,
 ) -> dict:
     """Choose the global operating threshold on (typically validation) data.
 
@@ -162,6 +188,12 @@ def sweep_threshold(
     target is still the maximum-specificity operating point. The threshold
     never goes below min_threshold: if the target is only reachable beneath
     the floor, the operating point IS the floor and target_met is False.
+
+    sample_weight (one per sample) makes every per-class recall a weighted
+    fraction: sum of weights of recalled chips over the class's total weight
+    (--confidence-weight: a doubted label counts for less, so the sweep is
+    not dragged down to accept chips the labeller did not trust). None
+    counts every chip once.
 
     Returns a dict with:
       threshold        chosen operating point (accept if s >= threshold)
@@ -174,7 +206,9 @@ def sweep_threshold(
                        the model's ceiling ignoring the floor
       predicted_counts {class_index: samples argmax-assigned to the class}
       min_threshold    the floor in effect
+      recall_weighted  whether sample_weight shaped the recalls
     """
+    w = _weights(sample_weight, len(labels))
     scores = genuineness_scores(probs, hn_index)
     pred = non_hn_argmax(probs, hn_index)
     genuine = labels != hn_index
@@ -185,13 +219,19 @@ def sweep_threshold(
     s_sorted = scores[order]
     labels_s = labels[order]
     correct_s = (pred[order] == labels_s) & genuine[order]
+    w_s = w[order]
 
-    class_ids = [int(c) for c in np.unique(labels[genuine])]
-    class_totals = {c: int((labels == c).sum()) for c in class_ids}
+    class_ids = _weighted_class_ids(labels, genuine, w)
+    if not class_ids:
+        raise ValueError("no genuine samples with positive weight to sweep a "
+                         "threshold on")
+    class_totals = {c: float(w[labels == c].sum()) for c in class_ids}
 
-    # Cumulative per-class recall as the accepted set grows (threshold falls).
+    # Cumulative (weighted) per-class recall as the accepted set grows
+    # (threshold falls).
     cum_recall = {
-        c: np.cumsum(correct_s & (labels_s == c)) / class_totals[c] for c in class_ids
+        c: np.cumsum((correct_s & (labels_s == c)) * w_s) / class_totals[c]
+        for c in class_ids
     }
     agg_curve = aggregate_recall(np.stack([cum_recall[c] for c in class_ids]), agg)
 
@@ -227,6 +267,7 @@ def sweep_threshold(
         "accepted_counts": {int(c): int((accepted_mask & (pred == c)).sum())
                             for c in range(probs.shape[1]) if c != hn_index},
         "min_threshold": float(min_threshold),
+        "recall_weighted": sample_weight is not None,
     }
 
 
@@ -238,6 +279,7 @@ def sweep_class_thresholds(
     agg: str = "macro",
     min_threshold: float = 0.0,
     min_count: int = 20,
+    sample_weight: "np.ndarray | None" = None,
 ) -> dict:
     """Choose one operating threshold per genuine class.
 
@@ -252,10 +294,13 @@ def sweep_class_thresholds(
 
     target_met requires EVERY class with genuine validation samples to meet
     the target (per-class mode implicitly gates like --recall-agg min; the
-    agg still shapes the single reported recall number).
+    agg still shapes the single reported recall number). sample_weight
+    weights the recalls as in sweep_threshold; the min_count gate stays a
+    plain sample count (it is about estimation stability, not trust).
     """
+    w = _weights(sample_weight, len(labels))
     global_op = sweep_threshold(probs, labels, hn_index, target_recall, agg,
-                                min_threshold)
+                                min_threshold, sample_weight=sample_weight)
     scores = genuineness_scores(probs, hn_index)
     pred = non_hn_argmax(probs, hn_index)
 
@@ -267,20 +312,22 @@ def sweep_class_thresholds(
             continue
         part = np.flatnonzero(pred == c)
         n_true = int((labels == c).sum())
-        if n_true == 0 or len(part) < min_count:
+        w_true = float(w[labels == c].sum())
+        if n_true == 0 or w_true <= 0 or len(part) < min_count:
             thresholds[c] = global_op["threshold"]
             fallback[c] = True
             continue
         fallback[c] = False
         order = np.argsort(-scores[part], kind="stable")
         s_sorted = scores[part][order]
-        curve = np.cumsum(labels[part][order] == c) / n_true
+        curve = np.cumsum((labels[part][order] == c) * w[part][order]) / w_true
         k, ok = _choose_cut(s_sorted, curve, target_recall, min_threshold)
         thresholds[c] = (_cut_threshold(s_sorted, k, min_threshold) if ok
                          else float(min_threshold))
         met[c] = ok
 
-    res = apply_threshold(probs, labels, hn_index, thresholds, agg=agg)
+    res = apply_threshold(probs, labels, hn_index, thresholds, agg=agg,
+                          sample_weight=sample_weight)
     for c, r in res["per_class_recall"].items():
         if fallback.get(c):  # judged at the fallback threshold it actually uses
             met[c] = r >= target_recall
@@ -299,24 +346,30 @@ def sweep_class_thresholds(
         "accepted_counts": res["accepted_counts"],
         "fallback_classes": sorted(c for c, f in fallback.items() if f),
         "min_threshold": float(min_threshold),
+        "recall_weighted": res["recall_weighted"],
     }
 
 
 def apply_threshold(
     probs: np.ndarray, labels: np.ndarray, hn_index: int,
     threshold: "float | dict[int, float]", agg: str = "macro",
+    sample_weight: "np.ndarray | None" = None,
 ) -> dict:
     """Evaluate a FIXED operating point (e.g. the stored one, on the test
     split). `threshold` is either the global scalar or a {class: t} dict of
-    per-class thresholds, applied by predicted class."""
+    per-class thresholds, applied by predicted class. sample_weight makes
+    each per-class recall a weighted fraction (see sweep_threshold); TPR
+    and specificity stay plain fractions of chips."""
+    w = _weights(sample_weight, len(labels))
     scores = genuineness_scores(probs, hn_index)
     pred = non_hn_argmax(probs, hn_index)
     genuine = labels != hn_index
     accepted = scores >= _per_sample_thresholds(threshold, pred, probs.shape[1])
     correct = accepted & (pred == labels) & genuine
 
-    class_ids = [int(c) for c in np.unique(labels[genuine])]
-    per_class = {c: float(correct[labels == c].mean()) for c in class_ids}
+    class_ids = _weighted_class_ids(labels, genuine, w)
+    per_class = {c: float((correct * w)[labels == c].sum() / w[labels == c].sum())
+                 for c in class_ids}
 
     n_hn = int((~genuine).sum())
     recall = (float(aggregate_recall(np.array(list(per_class.values())), agg))
@@ -334,7 +387,32 @@ def apply_threshold(
         # confusion-matrix column; rejected samples land on hard_negative
         "accepted_counts": {int(c): int((accepted & (pred == c)).sum())
                             for c in range(probs.shape[1]) if c != hn_index},
+        "recall_weighted": sample_weight is not None,
     }
+
+
+def recall_by_confidence(labels: np.ndarray, final_pred: np.ndarray,
+                         confidence: np.ndarray, hn_index: int) -> list[dict]:
+    """The labels-or-model diagnostic: for each rating level (0 = unrated,
+    1..5) the genuine chips at that level, how many were recalled at the
+    operating point (accepted AND classified right - final_pred from
+    final_prediction) and the plain recall fraction. A model that misses
+    mostly low-rated chips is disagreeing with labels the labeller doubted;
+    look at the labels before the model. Levels with no chips are left
+    out."""
+    labels = np.asarray(labels)
+    final_pred = np.asarray(final_pred)
+    conf = np.asarray(confidence)
+    genuine = labels != hn_index
+    recalled = genuine & (final_pred == labels)
+    rows = []
+    for r in range(CONFIDENCE_UNRATED, CONFIDENCE_MAX + 1):
+        m = genuine & (conf == r)
+        n = int(m.sum())
+        if n:
+            hits = int(recalled[m].sum())
+            rows.append({"rating": r, "n": n, "recalled": hits, "recall": hits / n})
+    return rows
 
 
 def final_prediction(probs: np.ndarray, hn_index: int,

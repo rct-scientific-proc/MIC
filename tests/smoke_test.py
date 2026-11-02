@@ -94,6 +94,19 @@ def main() -> None:
                        [0, 1 / 16, 1 / 4, 9 / 16, 1])
     assert np.allclose(confidence_weights(conf, lab2, 2, 0.5, "step:4")[1:6],
                        [.5, .5, .5, 1, 1])
+    # weighted recall in the sweep: a doubted chip (weight 0.1) the model
+    # rejects no longer drags the threshold down until it is accepted
+    from metrics import apply_threshold, sweep_threshold
+    pr = np.array([[.9, .1], [.8, .2], [.7, .3], [.2, .8], [.1, .9], [.05, .95]])
+    lb = np.array([0, 0, 0, 0, 1, 1])
+    wv = np.array([1, 1, 1, 0.1, 1, 1])
+    plain = sweep_threshold(pr, lb, 1, 0.95)
+    weighted = sweep_threshold(pr, lb, 1, 0.95, sample_weight=wv)
+    assert plain["threshold"] < 0.3 < 0.4 < weighted["threshold"], \
+        (plain["threshold"], weighted["threshold"])
+    assert weighted["recall_weighted"] and not plain["recall_weighted"]
+    assert abs(apply_threshold(pr, lb, 1, 0.5, sample_weight=wv)["recall"]
+               - 3 / 3.1) < 1e-9
 
     common = [
         REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
@@ -154,6 +167,15 @@ def main() -> None:
     m_rows = list(csv.DictReader(open(out_cfg / "metrics.csv")))
     assert [r["epoch"] for r in m_rows] == ["20", "21"], [r["epoch"] for r in m_rows]
     assert m_rows[-1]["event"] == "crt" and m_rows[-1]["hn_alpha"] == "1.0000", m_rows[-1]
+    # --confidence-weight reaches into validation by default: the column
+    # says so, and evaluate.py reproduces the weighting from the checkpoint
+    # and adds the recall-by-rating block
+    assert all(r["recall_weighted"] == "1" for r in m_rows), "validation recall not weighted"
+    run(REPO / "evaluate.py", out_cfg, h5, "--split", "1",
+        "--out-dir", out_cfg / "eval", "--no-report", *GPU)
+    cfg_report = (out_cfg / "eval" / "report.txt").read_text(encoding="utf-8")
+    assert "confidence-weighted" in cfg_report, cfg_report
+    assert "recall by confidence rating" in cfg_report, cfg_report
     alphas = {}
     for r in csv.DictReader(open(out_cfg / "class_thresholds.csv")):
         alphas.setdefault(r["epoch"], {})[r["class"]] = r["alpha"]
@@ -379,6 +401,9 @@ def main() -> None:
     assert r_u16.returncode == 0, r_u16.stderr[-2000:]
     assert "has no 'confidence' column" in r_u16.stdout, r_u16.stdout[-800:]
     assert (OUT_ROOT / "run_u16" / "metrics.csv").exists()
+    assert all(r["recall_weighted"] == "0"
+               for r in csv.DictReader(open(OUT_ROOT / "run_u16" / "metrics.csv"))), \
+        "a file without the column must log unweighted recall"
 
     # a 16-bit single-band scene through that uint16-trained model: the
     # loader must scale it like the training file (Pillow's convert("L")

@@ -32,9 +32,10 @@ from torch.utils.data import DataLoader
 from checkpoints import find_checkpoint, load_checkpoint, utc_stamp
 from dataset import (SPLIT_NAMES, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
                      set_display_channel, validate_h5)
+from losses import confidence_weights
 from metrics import (apply_threshold, calibration_bins, collect_probs,
                      final_prediction, genuine_vs_hn_roc, genuineness_scores,
-                     non_hn_argmax, per_class_ovr_roc)
+                     non_hn_argmax, per_class_ovr_roc, recall_by_confidence)
 from model import build_model, to_device
 from sampler import MINED_CSV, write_mined_csv
 from plots import (plot_calibration, plot_confusion, plot_confusion_grid,
@@ -438,6 +439,16 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
     class_rows = _read_csv(run_dir / "class_thresholds.csv")
     summary = validate_h5(str(h5_path))
 
+    # this split's per-row metadata (labels, ratings) in loader order; the
+    # run's confidence weighting, when it reached validation, applies to the
+    # recalls here too
+    meta_ds = H5SnippetDataset(str(h5_path), split)
+    cw = best.get("confidence_weighting")
+    sample_w = None
+    if cw and cw.get("validation") and meta_ds.confidence is not None:
+        sample_w = confidence_weights(meta_ds.confidence, meta_ds.labels, hn_index,
+                                      cw["min"], cw["curve"])
+
     # ---- inference with the stored operating point (skipped when the
     # caller already ran it) -------------------------------------------------
     if probs is None or labels is None:
@@ -451,7 +462,8 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
         probs, labels = collect_probs(model, loader, dev,
                                       desc="report inference",
                                       progress=progress)
-    res = apply_threshold(probs, labels, hn_index, operating, agg=recall_agg)
+    res = apply_threshold(probs, labels, hn_index, operating, agg=recall_agg,
+                          sample_weight=sample_w)
     pred = final_prediction(probs, hn_index, operating)
     cm = np.bincount(labels * len(classes) + pred,
                      minlength=len(classes) ** 2).reshape(len(classes), -1)
@@ -573,7 +585,8 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
         f"target {config.get('target_recall')} ({recall_agg}) at best epoch "
         f"{best['epoch']}",
         f"{SPLIT_NAMES[split]} split at the stored operating point: "
-        f"{recall_agg} recall {res['recall']:.4f}, HN specificity "
+        f"{recall_agg} recall {res['recall']:.4f}"
+        f"{' (confidence-weighted)' if sample_w is not None else ''}, HN specificity "
         f"{res['specificity']:.4f}, TPR {res['tpr']:.4f}, AUROC {auroc:.4f}, "
         f"ECE {cal['ece']:.4f}",
         ("per-class thresholds "
@@ -627,6 +640,27 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
                          int((labels == c).sum()), flags])
     _table(pdf, ["class", "recall", "threshold", "n", "flags"], per_rows,
            widths=[pdf.epw * w for w in (0.3, 0.17, 0.19, 0.12, 0.22)])
+
+    if meta_ds.confidence is not None:
+        # the labels-or-model diagnostic: recall per labeller rating
+        _h2(pdf, "Recall by confidence rating")
+        conf_rows = []
+        for row in recall_by_confidence(labels, pred, meta_ds.confidence, hn_index):
+            w_txt = "-"
+            if sample_w is not None:
+                w_txt = f"{confidence_weights(np.array([row['rating']]), np.array([0]), hn_index, cw['min'], cw['curve'])[0]:.2f}"
+            conf_rows.append(["unrated" if row["rating"] == 0 else str(row["rating"]),
+                              row["n"], row["recalled"], f"{row['recall']:.4f}", w_txt])
+        _table(pdf, ["rating", "genuine chips", "recalled", "recall", "weight"],
+               conf_rows, widths=[pdf.epw * w for w in (0.2, 0.2, 0.2, 0.2, 0.2)])
+        _para(pdf, "GeoLabeller's 1-5 labeller rating per chip (0 = unrated). "
+                   "Recall here is the plain fraction of chips at each level "
+                   "recalled at the stored operating point. A model that misses "
+                   "mostly low-rated chips is disagreeing with labels the "
+                   "labeller doubted - look at those labels before the model. "
+                   + ("'weight' is the loss / recall weight the run gave the "
+                      "level (--confidence-weight)." if sample_w is not None
+                      else "This run did not weight by confidence."), size=8.5)
 
     for key in ("roc", "calibration", "confusion"):
         if key in charts:

@@ -951,9 +951,30 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     <p>Mechanics: the weights multiply the per-sample focal loss and the
     batch loss is their weighted mean (normalised by the weight sum, so
     the loss scale and learning rate stay comparable to an unweighted
-    run), in the main loop and the cRT phase alike. Validation, the
-    threshold sweep, the miner's difficulties and every metric stay
-    unweighted. The mapping is printed at start-up
+    run), in the main loop and the cRT phase alike. <strong>The same
+    weights reach into validation</strong> unless
+    <code>--confidence-train-only</code>: every per-class recall becomes a
+    weighted fraction — the weight of the chips recalled over the class's
+    total weight — so the threshold sweep, the recall target, the per-class
+    recall in <code>class_thresholds.csv</code>, rescue decisions and the
+    Optuna objective all count a doubted chip for less. Otherwise the
+    operating point would undo the training: to reach 95% recall over
+    <em>every</em> chip the sweep must lower the threshold until the
+    doubted (and perhaps mislabelled) ones are accepted too, and
+    specificity pays for labels the model was allowed to disagree with.
+    Specificity, TPR, AUROC, calibration and the miner's difficulties stay
+    plain fractions of chips (hard negatives weigh 1 anyway). A class
+    whose validation chips all weigh 0 drops out of the aggregate, as an
+    absent class would. The checkpoint records the mapping and whether
+    validation used it (<code>confidence_weighting</code>), so
+    <code>evaluate.py</code> and <code>report.py</code> apply the same view
+    of the labels to any split carrying the column — and say so in their
+    recall lines — while <code>metrics.csv</code> carries a trailing
+    <code>recall_weighted</code> column. Both reports add a
+    <strong>recall-by-rating table</strong> whenever the file has the
+    column: plain recall at each rating level (unrated, 1–5). A model that
+    misses mostly low-rated chips is disagreeing with labels the labeller
+    doubted — look at those labels before the model. The mapping is printed at start-up
     (<code>5-&gt;1.00 4-&gt;0.80 ... 1-&gt;0.20; unrated and hard negatives
     1.00; N of M training genuine chips rated</code>), the dataset summary
     lists the rating counts, and a file without the column trains
@@ -972,6 +993,17 @@ step:K     MIN below rating K, 1.0 from K   step:3 — a hard cut between "doubt
     <p>Requires <code>--confidence-weight</code>. A malformed spec
     (<code>power</code> without an exponent, <code>step:1</code>) is
     refused at parse time.</p>
+  </div>
+
+  <div class="arg" id="t-confidence-train-only">
+    <div class="arg-head"><span class="flag">--confidence-train-only</span><span class="badge">switch</span><span class="badge">default: off (weights reach validation)</span></div>
+    <p>Apply the rating weights to the training loss only and keep every
+    recall a plain fraction of chips: the sweep then demands the target
+    over doubted chips too. Use it when the validation labels were rated
+    by someone else than the training labels, or when you want the
+    reported recall comparable with runs that never saw the column.
+    Requires <code>--confidence-weight</code>; recorded in the checkpoint
+    so evaluation follows suit.</p>
   </div>
 
   <h3>Hard-negative pressure ramp</h3>

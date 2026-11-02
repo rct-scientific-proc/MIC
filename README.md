@@ -97,7 +97,10 @@ Key options (see `python train.py --help` for all):
   (GeoLabeller's optional `confidence` column): rating 5 weighs 1, rating 1
   weighs `MIN`, unrated chips and all hard negatives weigh 1. A doubtful
   label the model disagrees with costs little; a sure one costs the full
-  loss. Validation and the threshold sweep stay unweighted.
+  loss. The same weights shape validation recall (the threshold sweep and
+  the recall target count a doubted chip for less) unless
+  `--confidence-train-only`; evaluate/report reproduce the weighting from
+  the checkpoint, and both reports add a recall-by-rating table.
 - `--imagenet-norm` — ImageNet mean/std normalization (default: images are
   only scaled to [0,1]). Applies to eval too (recorded in the checkpoint).
 - `--amp` — mixed precision on CUDA.

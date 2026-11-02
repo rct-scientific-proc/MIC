@@ -113,7 +113,7 @@ CSV_FIELDS = [
     "epoch", "train_loss", "threshold", "threshold_mode", "thr_min", "thr_max",
     "target_met", "recall", "recall_agg", "specificity", "max_recall", "auroc",
     "hn_alpha", "imbalance_ratio", "ramp_progress", "pressure", "cycle",
-    "event", "lr", "epoch_time_s",
+    "event", "lr", "epoch_time_s", "recall_weighted",
 ]
 CLASS_CSV_FIELDS = ["epoch", "class", "threshold", "recall", "predicted_n",
                     "accepted_n", "fallback", "alpha", "repeat"]
@@ -282,10 +282,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "doubtful label the model disagrees with then costs "
                         "little, a sure one costs the full loss. The weights "
                         "multiply the per-sample focal loss, normalised by "
-                        "their sum, in the main loop and the cRT phase alike; "
-                        "validation, the threshold sweep and mining are "
-                        "unweighted. A file without the column trains "
-                        "unweighted, with a note")
+                        "their sum, in the main loop and the cRT phase alike, "
+                        "and - unless --confidence-train-only - validation "
+                        "recall counts chips by the same weights, so the "
+                        "threshold sweep and the recall target are not dragged "
+                        "down to accept chips the labeller doubted (mining, "
+                        "specificity, TPR and AUROC stay unweighted). A file "
+                        "without the column trains unweighted, with a note")
     o.add_argument("--confidence-curve", default="linear", metavar="SPEC",
                    help="shape of the rating -> weight mapping from MIN "
                         "(rating 1) to 1.0 (rating 5): linear (default); "
@@ -293,6 +296,15 @@ def build_parser() -> argparse.ArgumentParser:
                         "so only the surest labels count fully, P < 1 lifts "
                         "them so only the shakiest lose much; step:K for MIN "
                         "below rating K and 1.0 from K up")
+    o.add_argument("--confidence-train-only", action="store_true",
+                   help="apply the rating weights to the training loss only, "
+                        "keeping validation recall a plain fraction of chips. "
+                        "By default the same weights shape validation recall - "
+                        "the threshold sweep, the recall target, per-class "
+                        "recall and everything decided from them, and "
+                        "evaluate.py / report.py on splits carrying the "
+                        "column - so the operating point is chosen under the "
+                        "same view of the labels the model was trained under")
     o.add_argument("--imbalance-ratio", type=float, default=math.inf,
                    help="max hard negatives per epoch = ratio * genuine count (1..inf)")
     o.add_argument("--focal-gamma", type=float, default=2.0,
@@ -615,6 +627,8 @@ def parse_args(argv=None, overrides=None) -> argparse.Namespace:
         parse_confidence_curve(args.confidence_curve)
     except ValueError as e:
         p.error(f"--confidence-curve: {e}")
+    if args.confidence_train_only and args.confidence_weight is None:
+        p.error("--confidence-train-only needs --confidence-weight")
     if args.save_every < 1:
         p.error("--save-every must be >= 1")
     if args.optuna is not None and args.optuna < 1:
@@ -878,16 +892,22 @@ def ramp_values(args, ramp_progress: int, n_genuine: int, n_hn: int) -> tuple[fl
 def validate(model, loader, device, hn_index, target_recall, recall_agg,
              min_threshold: float = 0.0, threshold_mode: str = "global",
              per_class_min_count: int = 20, amp: bool = False,
-             desc: str = "validate", progress: bool = True) -> dict:
+             desc: str = "validate", progress: bool = True,
+             sample_weight=None) -> dict:
+    """Validation pass + threshold sweep. sample_weight (one per validation
+    sample, loader order) weights the recalls: --confidence-weight reaching
+    into the operating point."""
     probs, labels = collect_probs(model, loader, device, desc=desc,
                                   progress=progress, amp=amp)
     if threshold_mode == "per-class":
         op = sweep_class_thresholds(probs, labels, hn_index, target_recall,
                                     agg=recall_agg, min_threshold=min_threshold,
-                                    min_count=per_class_min_count)
+                                    min_count=per_class_min_count,
+                                    sample_weight=sample_weight)
     else:
         op = sweep_threshold(probs, labels, hn_index, target_recall,
-                             agg=recall_agg, min_threshold=min_threshold)
+                             agg=recall_agg, min_threshold=min_threshold,
+                             sample_weight=sample_weight)
     try:
         _, _, auroc = genuine_vs_hn_roc(probs, labels, hn_index)
     except ValueError:
@@ -910,7 +930,8 @@ def selection_key(op: dict) -> tuple:
 def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classes,
                     hn_index, op, best_key, miner=None, ramp_progress=0,
                     controller=None, ema_model=None, in_channels=3,
-                    input_size=None, crt_done=0) -> None:
+                    input_size=None, crt_done=0,
+                    confidence_weighting=None) -> None:
     # model_state is always the DEPLOYED weights (the EMA twin when --ema is
     # on); raw_model_state keeps the underlying training weights for resume
     deploy = ema_model.module if ema_model is not None else model
@@ -938,6 +959,10 @@ def save_checkpoint(path: Path, *, model, optimizer, scaler, epoch, args, classe
         "class_thresholds": op.get("class_thresholds"),
         "min_threshold": args.min_threshold,
         "recall_agg": args.recall_agg,
+        # {"min", "curve", "validation"} when --confidence-weight shaped the
+        # run (validation: whether recall was weighted too), else None;
+        # evaluate/report reproduce the same view of the labels from it
+        "confidence_weighting": confidence_weighting,
         "val_metrics": op,
         "best_key": best_key,
         "miner_state": miner.state_dict() if miner is not None else None,
@@ -1043,6 +1068,25 @@ def train(args, on_epoch_end=None) -> dict:
                   + "  ".join(f"{c}->{table[c - 1]:.2f}" for c in range(5, 0, -1))
                   + f"; unrated and hard negatives 1.00; {n_rated} of {n_genuine} "
                   "training genuine chips rated")
+    # the same mapping weights validation recall unless --confidence-train-only:
+    # the sweep then is not dragged down to accept chips the labeller doubted
+    val_weights = None
+    cw_record = None
+    if sample_weights is not None:
+        cw_record = {"min": args.confidence_weight, "curve": args.confidence_curve,
+                     "validation": not args.confidence_train_only}
+        if not args.confidence_train_only:
+            val_weights = confidence_weights(val_ds.confidence, val_ds.labels,
+                                             hn_index, args.confidence_weight,
+                                             args.confidence_curve)
+            n_val_rated = int(((val_ds.confidence > 0)
+                               & (val_ds.labels != hn_index)).sum())
+            print("validation recall is confidence-weighted by the same mapping "
+                  f"({n_val_rated} of {int((val_ds.labels != hn_index).sum())} "
+                  "validation genuine chips rated): the threshold sweep, the "
+                  "recall target and per-class recall count a doubted chip for "
+                  "less; specificity, TPR and AUROC are plain fractions "
+                  "(--confidence-train-only keeps recall unweighted)")
 
     hn_alpha0, ratio0 = ramp_values(args, 0, n_genuine, n_hn)
     sampler = ImbalanceCapSampler(
@@ -1211,6 +1255,7 @@ def train(args, on_epoch_end=None) -> dict:
             "pressure": p_used if p_used == "" else f"{p_used:.3f}",
             "cycle": cycle_used, "event": event,
             "lr": f"{lr:.3e}", "epoch_time_s": f"{dt:.1f}",
+            "recall_weighted": int(bool(op.get("recall_weighted"))),
         })
         csv_file.flush()
         fallback_set = set(op.get("fallback_classes", []))
@@ -1301,7 +1346,8 @@ def train(args, on_epoch_end=None) -> dict:
                       args.recall_agg, min_threshold=args.min_threshold,
                       threshold_mode=args.threshold_mode,
                       per_class_min_count=args.per_class_min_count, amp=amp,
-                      desc=f"epoch {epoch} validate", progress=progress)
+                      desc=f"epoch {epoch} validate", progress=progress,
+                      sample_weight=val_weights)
         dt = time.time() - t0
 
         if controller is None and op["target_met"] and args.ramp_epochs > 0:
@@ -1317,7 +1363,7 @@ def train(args, on_epoch_end=None) -> dict:
                        hn_index=hn_index, op=op, miner=miner,
                        ramp_progress=ramp_progress, controller=controller,
                        ema_model=ema_model, in_channels=in_channels,
-                            input_size=input_hw)
+                       input_size=input_hw, confidence_weighting=cw_record)
         if controller is not None:
             improved_this_cycle = improved_this_cycle or improved
             if controller.observe(key):
@@ -1408,7 +1454,7 @@ def train(args, on_epoch_end=None) -> dict:
                             ramp_progress=ramp_progress,
                             controller=controller, best_key=best_key,
                             ema_model=ema_model, in_channels=in_channels,
-                            input_size=input_hw)
+                            input_size=input_hw, confidence_weighting=cw_record)
             prune_role(out_dir, "last", last_path)
 
         if on_epoch_end is not None and on_epoch_end(epoch, op):
@@ -1481,7 +1527,8 @@ def train(args, on_epoch_end=None) -> dict:
                           args.recall_agg, min_threshold=args.min_threshold,
                           threshold_mode=args.threshold_mode,
                           per_class_min_count=args.per_class_min_count, amp=amp,
-                          desc=f"epoch {crt_epoch} validate", progress=progress)
+                          desc=f"epoch {crt_epoch} validate", progress=progress,
+                          sample_weight=val_weights)
             dt = time.time() - t0
             key = selection_key(op)
             improved = best_key is None or key > tuple(best_key)
@@ -1490,7 +1537,8 @@ def train(args, on_epoch_end=None) -> dict:
                            hn_index=hn_index, op=op, miner=miner,
                            ramp_progress=ramp_progress, controller=controller,
                            ema_model=None, in_channels=in_channels,
-                           input_size=input_hw, crt_done=i + 1)
+                           input_size=input_hw, crt_done=i + 1,
+                           confidence_weighting=cw_record)
             if improved:
                 best_key = key
                 best_op, best_epoch = op, crt_epoch
