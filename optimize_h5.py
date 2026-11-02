@@ -8,8 +8,14 @@ decompression, and the OS page cache serves repeats. Compressed sources
 single-image read can decompress thousands of images) become fast files at
 the cost of disk. --compression gzip/lzf is still available when disk
 matters more than read speed (written with per-image chunks so reads stay
-sane). Labels/gt/split/classes are copied verbatim; the output is
-validated and a measured random-read throughput comparison is printed.
+sane). Every other dataset aligned to the images' rows - labels, gt,
+split, curate's removed mask, and whatever the writer added (GeoLabeller's
+confidence, orientation_*, nodata_filled, locations, object_ids, ...) -
+follows the same row order, GeoLabeller's mask table (mask_pixels /
+mask_sample / mask_names, keyed by image row) is carried with its row keys
+remapped, and the file's attributes (export settings) travel along. The
+output is validated and a measured random-read throughput comparison is
+printed.
 
 Optional --resize N additionally resizes every image to NxN (224 unless
 you train with --input-size), batched through the GPU when available.
@@ -72,6 +78,44 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--device", default=None, help="cuda / cpu (default: auto)")
     p.add_argument("--no-progress", action="store_true")
     return p.parse_args(argv)
+
+
+# GeoLabeller's mask sidecar: one binary layer per (image row, name)
+MASK_TABLE = ("mask_pixels", "mask_sample", "mask_names")
+
+
+def _copy_masks(fin, fout, order: np.ndarray, n_in: int, oh: int, ow: int,
+                comp: dict, device, batch: int = 256) -> int:
+    """Carry the mask table through a row permutation (and purge): a mask
+    whose image row survives gets that row's new index, the rest are
+    dropped. With --resize the layers are resized like the images, nearest
+    neighbour since they are binary. Returns the number of masks kept."""
+    new_row = np.full(n_in, -1, dtype=np.int64)
+    new_row[order] = np.arange(len(order))
+    sample = fin["mask_sample"][:].astype(np.int64)
+    keep = np.flatnonzero((sample >= 0) & (sample < n_in))
+    keep = keep[new_row[sample[keep]] >= 0]
+    if not len(keep):
+        return 0
+    mask_comp = dict(comp)
+    if "chunks" in mask_comp:
+        mask_comp["chunks"] = (1, oh, ow)
+    pixels = fout.create_dataset("mask_pixels", shape=(len(keep), oh, ow),
+                                 dtype=fin["mask_pixels"].dtype, **mask_comp)
+    fout.create_dataset("mask_sample", data=new_row[sample[keep]], dtype="int64")
+    fout.create_dataset("mask_names", data=fin["mask_names"][:][keep],
+                        dtype=fin["mask_names"].dtype)
+    src_hw = tuple(fin["mask_pixels"].shape[1:3])
+    for start in range(0, len(keep), batch):
+        idx = keep[start:start + batch]
+        block = fin["mask_pixels"][idx]  # keep is ascending: ordered selection
+        if src_hw != (oh, ow):
+            t = torch.from_numpy(np.ascontiguousarray(block)).unsqueeze(1).to(device)
+            t = v2.functional.resize(t, [oh, ow],
+                                     interpolation=v2.InterpolationMode.NEAREST)
+            block = t.squeeze(1).cpu().numpy()
+        pixels[start:start + len(idx)] = block
+    return len(keep)
 
 
 def _read_speed(path, k: int = 512, seed: int = 0) -> float:
@@ -149,15 +193,36 @@ def main(argv=None) -> None:
         out = Path(args.output)
         out.parent.mkdir(parents=True, exist_ok=True)
         with h5py.File(out, "w") as fout:
+            for key, value in fin.attrs.items():  # export settings travel along
+                fout.attrs[key] = value
+            if resizing:
+                for key, value in (("height", oh), ("width", ow)):
+                    if key in fout.attrs:
+                        fout.attrs[key] = value
             dset = fout.create_dataset("images", shape=(n_out, oh, ow, c),
                                        dtype=fin["images"].dtype, **comp)
-            for name in ("labels", "gt", "split"):
-                fout[name] = fin[name][:][order]
-            if "removed" in fin and not args.drop_removed:
-                # keep is all-True when not dropping, so order covers every
-                # row; the mask follows the same permutation as the images
-                fout["removed"] = fin["removed"][:][order]
+            # every dataset aligned to the images' rows follows their order:
+            # labels/gt/split, curate's removed mask (dropped rows need
+            # none), and whatever else the writer aligned (confidence,
+            # orientation_*, nodata_filled, locations, object_ids, ...)
+            carried = []
+            for name, obj in fin.items():
+                if (name in ("images", "classes") or name in MASK_TABLE
+                        or not isinstance(obj, h5py.Dataset)
+                        or obj.ndim < 1 or obj.shape[0] != n):
+                    continue
+                if name == "removed" and args.drop_removed:
+                    continue
+                fout.create_dataset(name, data=obj[:][order], dtype=obj.dtype)
+                carried.append(name)
             fout["classes"] = np.array(fin["classes"].asstr()[:], dtype=object)
+            n_masks = (_copy_masks(fin, fout, order, n, oh, ow, comp, device)
+                       if "mask_pixels" in fin else 0)
+            extra = [nm for nm in carried if nm not in ("labels", "gt", "split")]
+            print("carried: labels, gt, split"
+                  + (", " + ", ".join(extra) if extra else "")
+                  + (f"; {n_masks} masks (row keys remapped)" if n_masks else "")
+                  + (f"; {len(fin.attrs)} attributes" if len(fin.attrs) else ""))
 
             steps = range(0, n_out, args.batch_size)
             for out_start in tqdm(steps, desc="optimize", unit="batch",

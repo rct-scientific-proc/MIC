@@ -92,6 +92,12 @@ Key options (see `python train.py --help` for all):
   equivalent.
 - `--focal-gamma`, `--hn-alpha` — focal loss shape; genuine classes have
   alpha 1.
+- `--confidence-weight MIN` (with `--confidence-curve linear|power:P|step:K`)
+  — weight each chip's loss by the labeller's 1-5 confidence rating
+  (GeoLabeller's optional `confidence` column): rating 5 weighs 1, rating 1
+  weighs `MIN`, unrated chips and all hard negatives weigh 1. A doubtful
+  label the model disagrees with costs little; a sure one costs the full
+  loss. Validation and the threshold sweep stay unweighted.
 - `--imagenet-norm` — ImageNet mean/std normalization (default: images are
   only scaled to [0,1]). Applies to eval too (recorded in the checkpoint).
 - `--amp` — mixed precision on CUDA.
@@ -221,7 +227,10 @@ python optimize_h5.py big_src.h5 out.h5 --resize 224   # + pre-resize
 
 Rewrites any h5 with a contiguous, uncompressed images dataset so every
 per-sample read is a direct offset into the file (~240x faster random reads
-than h5py's default chunking under gzip; pixels byte-identical). All
+than h5py's default chunking under gzip; pixels byte-identical). Every
+other dataset aligned to the rows (`removed`, GeoLabeller's `confidence`,
+`orientation_*`, `nodata_filled`, `locations`, `object_ids`), its mask
+table (row keys remapped) and the file attributes are carried along. All
 project generators now write this layout natively; use this tool on files
 from other sources or older versions. `--resize N` is optional and pays off
 only when sources are larger than the target — for smaller sources it

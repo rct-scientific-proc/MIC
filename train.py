@@ -43,7 +43,7 @@ from controller import SmartController
 from dataset import (AUGMENTATIONS, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
                      load_augmentation_plugins, model_channels,
                      parse_input_size, set_display_channel, validate_h5)
-from losses import FocalLoss
+from losses import FocalLoss, confidence_weights, parse_confidence_curve
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
 from model import (ARCHS, build_model, init_classifier_prior,
@@ -272,6 +272,27 @@ def build_parser() -> argparse.ArgumentParser:
                         "inverse-frequency. --class-alpha NAME=VALUE still "
                         "overrides single classes, and rescue boosts stack "
                         "on top")
+    o.add_argument("--confidence-weight", type=float, default=None, metavar="MIN",
+                   help="weight each training chip's loss by the labeller's "
+                        "1-5 confidence rating (the optional 'confidence' "
+                        "column GeoLabeller's HDF5 export writes): a rating "
+                        "of 5 weighs 1.0, a rating of 1 weighs MIN (0..1), "
+                        "ratings in between follow --confidence-curve; "
+                        "unrated chips and every hard negative weigh 1.0. A "
+                        "doubtful label the model disagrees with then costs "
+                        "little, a sure one costs the full loss. The weights "
+                        "multiply the per-sample focal loss, normalised by "
+                        "their sum, in the main loop and the cRT phase alike; "
+                        "validation, the threshold sweep and mining are "
+                        "unweighted. A file without the column trains "
+                        "unweighted, with a note")
+    o.add_argument("--confidence-curve", default="linear", metavar="SPEC",
+                   help="shape of the rating -> weight mapping from MIN "
+                        "(rating 1) to 1.0 (rating 5): linear (default); "
+                        "power:P for t**P - P > 1 keeps mid ratings near MIN "
+                        "so only the surest labels count fully, P < 1 lifts "
+                        "them so only the shakiest lose much; step:K for MIN "
+                        "below rating K and 1.0 from K up")
     o.add_argument("--imbalance-ratio", type=float, default=math.inf,
                    help="max hard negatives per epoch = ratio * genuine count (1..inf)")
     o.add_argument("--focal-gamma", type=float, default=2.0,
@@ -586,6 +607,14 @@ def parse_args(argv=None, overrides=None) -> argparse.Namespace:
         p.error("--class-alpha-auto: beta must be in [0, 1)")
     if args.ema is not None and not 0 < args.ema < 1:
         p.error("--ema: decay must be in (0, 1)")
+    if args.confidence_weight is not None and not 0 <= args.confidence_weight <= 1:
+        p.error("--confidence-weight: MIN must be in [0, 1]")
+    if args.confidence_curve != "linear" and args.confidence_weight is None:
+        p.error("--confidence-curve needs --confidence-weight")
+    try:
+        parse_confidence_curve(args.confidence_curve)
+    except ValueError as e:
+        p.error(f"--confidence-curve: {e}")
     if args.save_every < 1:
         p.error("--save-every must be >= 1")
     if args.optuna is not None and args.optuna < 1:
@@ -739,7 +768,11 @@ HOST_SYNC_EVERY = 32
 
 def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
                     miner=None, ema_model=None, desc: str = "train",
-                    progress: bool = True) -> float:
+                    progress: bool = True,
+                    sample_weights: torch.Tensor | None = None) -> float:
+    """One pass over `loader`; returns the mean training loss. sample_weights
+    (one per training-split position, on `device`) scale each chip's loss
+    (--confidence-weight); the batch loss is then the weighted mean."""
     model.train()
     total_loss = torch.zeros((), device=device)
     total_n = 0
@@ -763,7 +796,11 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
         with torch.amp.autocast(device_type=device.type, enabled=amp):
             logits = model(imgs)
             per_sample = criterion(logits, labs)
-        loss = per_sample.mean()
+        if sample_weights is not None:
+            w = sample_weights[idxs.to(device, non_blocking=True)]
+            loss = (per_sample * w).sum() / w.sum().clamp_min(1e-12)
+        else:
+            loss = per_sample.mean()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -947,6 +984,12 @@ def train(args, on_epoch_end=None) -> dict:
     print(f"dataset: {args.h5}")
     for split_name, c in summary["counts"].items():
         print(f"  {split_name}: {c['genuine']} genuine, {c['hard_negative']} hard negatives")
+    if summary["confidence"] is not None:
+        cnt = summary["confidence"]["counts"]
+        print(f"  confidence: {sum(v for c, v in cnt.items() if c > 0)} rated "
+              "genuine chips ("
+              + ", ".join(f"{c}: {cnt[c]}" for c in sorted(cnt) if c > 0)
+              + f"), {cnt[0]} unrated")
     in_channels = model_channels(summary["channels"])
     try:
         set_display_channel(args.display_channel, summary["channels"])  # fail early
@@ -977,6 +1020,29 @@ def train(args, on_epoch_end=None) -> dict:
     miner = None if args.no_mining else HardNegativeMiner(train_ds.labels, hn_index)
     n_genuine = int((train_ds.labels != hn_index).sum())
     n_hn = int((train_ds.labels == hn_index).sum())
+
+    # --confidence-weight: per-sample loss weights from the labeller's
+    # ratings, indexed by training-split position like the miner
+    sample_weights = None
+    if args.confidence_weight is not None:
+        if train_ds.confidence is None:
+            print(f"NOTE: --confidence-weight {args.confidence_weight:g} ignored: "
+                  f"{args.h5} has no 'confidence' column (GeoLabeller writes it "
+                  "once a label is rated); training unweighted")
+        else:
+            w = confidence_weights(train_ds.confidence, train_ds.labels, hn_index,
+                                   args.confidence_weight, args.confidence_curve)
+            sample_weights = torch.from_numpy(w).to(device)
+            table = confidence_weights(np.arange(1, 6), np.zeros(5, dtype=np.int64),
+                                       hn_index, args.confidence_weight,
+                                       args.confidence_curve)
+            n_rated = int(((train_ds.confidence > 0)
+                           & (train_ds.labels != hn_index)).sum())
+            print(f"confidence weighting ({args.confidence_curve}, min "
+                  f"{args.confidence_weight:g}): "
+                  + "  ".join(f"{c}->{table[c - 1]:.2f}" for c in range(5, 0, -1))
+                  + f"; unrated and hard negatives 1.00; {n_rated} of {n_genuine} "
+                  "training genuine chips rated")
 
     hn_alpha0, ratio0 = ramp_values(args, 0, n_genuine, n_hn)
     sampler = ImbalanceCapSampler(
@@ -1229,7 +1295,8 @@ def train(args, on_epoch_end=None) -> dict:
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer,
                                      scaler, device, amp, miner=miner,
                                      ema_model=ema_model,
-                                     desc=f"epoch {epoch} train", progress=progress)
+                                     desc=f"epoch {epoch} train", progress=progress,
+                                     sample_weights=sample_weights)
         op = validate(eval_model, val_loader, device, hn_index, args.target_recall,
                       args.recall_agg, min_threshold=args.min_threshold,
                       threshold_mode=args.threshold_mode,
@@ -1408,7 +1475,8 @@ def train(args, on_epoch_end=None) -> dict:
                                          scaler, device, amp, miner=None,
                                          ema_model=None,
                                          desc=f"epoch {crt_epoch} crt",
-                                         progress=progress)
+                                         progress=progress,
+                                         sample_weights=sample_weights)
             op = validate(model, val_loader, device, hn_index, args.target_recall,
                           args.recall_agg, min_threshold=args.min_threshold,
                           threshold_mode=args.threshold_mode,

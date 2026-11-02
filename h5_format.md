@@ -16,6 +16,13 @@ index mapping across all datasets.
 | `split`   | uint8   | (N,)         | `0` = train, `1` = validate, `2` = test. |
 | `classes` | str     | (K,)         | Ordered list of class name strings; `labels` indexes into it, so K is the number of distinct label values. Last entry is always `"hard_negative"`. |
 | `removed` | bool    | (N,)         | *Optional.* `True` = snippet curated out (written by `curate.py`); every loader excludes it from **all** splits. Purge permanently with `optimize_h5.py --drop-removed`. |
+| `confidence` | uint8 | (N,)        | *Optional.* The labeller's rating of the label, `1` (lowest) to `5` (highest); `0` = unrated, and `0` for every hard negative. Written by GeoLabeller's HDF5 export once labels are rated. `train.py --confidence-weight` turns it into per-chip loss weights. |
+
+Other datasets aligned to the rows (GeoLabeller writes `orientation_px_rad`,
+`orientation_deg`, `orientation_derived`, `nodata_filled`, `locations`,
+`object_ids`, and a mask table `mask_pixels` / `mask_sample` / `mask_names`
+keyed by image row) are ignored by the loaders and carried intact, in the
+same row order, by `optimize_h5.py`.
 
 ---
 

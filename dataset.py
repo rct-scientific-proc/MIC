@@ -29,6 +29,11 @@ SPLIT_NAMES = {SPLIT_TRAIN: "train", SPLIT_VAL: "validate", SPLIT_TEST: "test"}
 
 HARD_NEGATIVE_NAME = "hard_negative"
 
+# Optional per-row 'confidence' column (GeoLabeller's HDF5 export): the
+# labeller's rating of each label, 1 lowest .. CONFIDENCE_MAX highest, 0 =
+# unrated - and 0 for every hard negative by convention.
+CONFIDENCE_UNRATED, CONFIDENCE_MAX = 0, 5
+
 # Allowed image dtypes and their expected pixel ranges (h5_format.md):
 #   uint8 0-255 · uint16 0-65535 · float16/float32 already scaled to [0, 1]
 IMAGE_DTYPES = {"uint8", "uint16", "float16", "float32"}
@@ -422,6 +427,21 @@ def validate_h5(path: str) -> dict:
                 raise ValueError(f"{path}: 'removed' length "
                                  f"{f['removed'].shape[0]} != images length {n}")
             removed = f["removed"][:].astype(bool)
+        confidence = None  # optional labeller rating per row (see CONFIDENCE_MAX)
+        if "confidence" in f:
+            if f["confidence"].shape[0] != n:
+                raise ValueError(f"{path}: 'confidence' length "
+                                 f"{f['confidence'].shape[0]} != images length {n}")
+            conf = f["confidence"][:].astype(np.int64)
+            lo, hi = int(conf.min(initial=0)), int(conf.max(initial=0))
+            if lo < CONFIDENCE_UNRATED or hi > CONFIDENCE_MAX:
+                raise ValueError(
+                    f"{path}: 'confidence' must hold {CONFIDENCE_UNRATED} "
+                    f"(unrated) or 1..{CONFIDENCE_MAX}, found {lo}..{hi}")
+            genuine_conf = conf[gt & ~removed]
+            confidence = {"counts": {c: int((genuine_conf == c).sum())
+                                     for c in range(CONFIDENCE_UNRATED,
+                                                    CONFIDENCE_MAX + 1)}}
 
         if labels.max(initial=0) >= len(classes):
             raise ValueError(f"{path}: label index out of range of classes")
@@ -445,7 +465,10 @@ def validate_h5(path: str) -> dict:
 
     return {"classes": list(classes), "hard_negative_index": hn_index,
             "counts": counts, "dtype": dt.name, "channels": channels,
-            "in_channels": model_channels(channels), "image_hw": image_hw}
+            "in_channels": model_channels(channels), "image_hw": image_hw,
+            # genuine-chip rating counts {0..5: n} when the file has the
+            # column, else None
+            "confidence": confidence}
 
 
 class H5SnippetDataset(Dataset):
@@ -480,6 +503,10 @@ class H5SnippetDataset(Dataset):
             self.indices = np.flatnonzero(keep)  # h5 row per sample
             self.labels = f["labels"][:][self.indices].astype(np.int64)
             self.gt = f["gt"][:][self.indices].astype(bool)
+            # labeller confidence per sample (0 = unrated / hard negative),
+            # None when the file has no such column
+            self.confidence = (f["confidence"][:][self.indices].astype(np.int64)
+                               if "confidence" in f else None)
 
             images = f["images"]
             src_hw = tuple(images.shape[1:3])

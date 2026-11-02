@@ -83,6 +83,17 @@ def main() -> None:
     lg = torch.tensor([[-60.0, 60.0, 0.0], [0.0, 0.0, 5.0]], requires_grad=True)
     crit(lg, torch.tensor([0, 2])).mean().backward()
     assert torch.isfinite(lg.grad).all(), "hn_margin gradient is not finite"
+    # --confidence-weight curves: rating 1 -> MIN, 5 -> 1, unrated and hard
+    # negatives (class 2 here) -> 1 whatever the curve
+    from losses import confidence_weights
+    conf = np.array([0, 1, 2, 3, 4, 5, 0, 5])
+    lab2 = np.array([0, 0, 0, 0, 0, 0, 2, 2])
+    assert np.allclose(confidence_weights(conf, lab2, 2, 0.2),
+                       [1, .2, .4, .6, .8, 1, 1, 1])
+    assert np.allclose(confidence_weights(conf, lab2, 2, 0.0, "power:2")[1:6],
+                       [0, 1 / 16, 1 / 4, 9 / 16, 1])
+    assert np.allclose(confidence_weights(conf, lab2, 2, 0.5, "step:4")[1:6],
+                       [.5, .5, .5, 1, 1])
 
     common = [
         REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
@@ -134,9 +145,12 @@ def main() -> None:
     # weights (alpha 1 for every class, hn_alpha 1) and the event 'crt'
     run(REPO / "train.py", "--config", out / "config.json",
         "--out-dir", out_cfg, "--epochs", "21", "--resume", out,
-        "--class-alpha", "band0=2.0", "--crt-epochs", "1", "--no-report")
+        "--class-alpha", "band0=2.0", "--crt-epochs", "1", "--no-report",
+        "--confidence-weight", "0.2")
     assert (out_cfg / "metrics.csv").exists()
     assert (out_cfg / "config.json").exists()
+    cfg_out = json.loads((out_cfg / "config.json").read_text(encoding="utf-8"))
+    assert cfg_out["confidence_weight"] == 0.2 and cfg_out["confidence_curve"] == "linear"
     m_rows = list(csv.DictReader(open(out_cfg / "metrics.csv")))
     assert [r["epoch"] for r in m_rows] == ["20", "21"], [r["epoch"] for r in m_rows]
     assert m_rows[-1]["event"] == "crt" and m_rows[-1]["hn_alpha"] == "1.0000", m_rows[-1]
@@ -216,7 +230,6 @@ def main() -> None:
 
     # ground truth in the GeoLabeller export schema: patch centres should
     # hit, a background point and an unknown class should not
-    import json
     gt = {
         "version": "3.2", "classes": ["band0", "band4", "mystery"],
         "images": [{
@@ -352,11 +365,19 @@ def main() -> None:
     h5_u16 = OUT_ROOT / "smoke_u16.h5"
     make_dataset(str(h5_u16), num_genuine_classes=3, genuine_per_class=20,
                  hn_factor=10.0, seed=3, channels=1, image_hw=(64, 64),
-                 dtype="uint16")
-    run(REPO / "train.py", h5_u16, "--arch", "resnet18", "--no-pretrained",
-        "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
-        "--out-dir", OUT_ROOT / "run_u16", "--no-report", "--patience", "0",
-        "--seed", "1", "--no-progress", *GPU_TRAIN)
+                 dtype="uint16", confidence=False)
+    # ... and, having no 'confidence' column, --confidence-weight is noted
+    # and the run proceeds unweighted (output captured for the note)
+    cmd_u16 = [sys.executable, str(REPO / "train.py"), str(h5_u16), "--arch",
+               "resnet18", "--no-pretrained", "--batch-size", "32",
+               "--target-recall", "0.5", "--epochs", "1", "--out-dir",
+               str(OUT_ROOT / "run_u16"), "--no-report", "--patience", "0",
+               "--seed", "1", "--no-progress", "--confidence-weight", "0.5",
+               *GPU_TRAIN]
+    print("::", " ".join(cmd_u16[1:]))
+    r_u16 = subprocess.run(cmd_u16, cwd=REPO, capture_output=True, text=True)
+    assert r_u16.returncode == 0, r_u16.stderr[-2000:]
+    assert "has no 'confidence' column" in r_u16.stdout, r_u16.stdout[-800:]
     assert (OUT_ROOT / "run_u16" / "metrics.csv").exists()
 
     # a 16-bit single-band scene through that uint16-trained model: the
@@ -396,9 +417,18 @@ def main() -> None:
     h5_f32 = OUT_ROOT / "smoke_f32.h5"
     with h5py.File(h5, "r") as a, h5py.File(h5_f32, "w") as b:
         b["images"] = a["images"][:].astype(np.float32) / 255.0
-        for k in ("labels", "gt", "split"):
+        for k in ("labels", "gt", "split", "confidence"):
             b[k] = a[k][:]
         b["classes"] = np.array(a["classes"].asstr()[:], dtype=object)
+        # GeoLabeller-style extras optimize_h5 must carry: another aligned
+        # column, a mask table keyed by image row, export attributes
+        n_f32 = a["images"].shape[0]
+        b["nodata_filled"] = np.arange(n_f32, dtype=np.uint32)
+        b["mask_pixels"] = np.ones((3, 64, 64), np.uint8)
+        b["mask_sample"] = np.array([5, 0, 7], dtype=np.int64)
+        b.create_dataset("mask_names", data=np.array(["a", "b", "c"], dtype=object),
+                         dtype=h5py.string_dtype("utf-8"))
+        b.attrs["overlap"] = 0.5
     run(REPO / "train.py", h5_f32, "--arch", "resnet18", "--no-pretrained",
         "--batch-size", "32", "--target-recall", "0.5", "--epochs", "1",
         "--input-size", "native",
@@ -429,6 +459,9 @@ def main() -> None:
         assert f["images"].dtype == np.float32, f["images"].dtype
         assert np.array_equal(f["images"][:8], s["images"][:8]), \
             "optimize changed float pixel values"
+        for k in ("confidence", "nodata_filled", "mask_sample"):
+            assert np.array_equal(f[k][:], s[k][:]), f"optimize dropped {k}"
+        assert f.attrs["overlap"] == 0.5, "optimize dropped the file attributes"
     # --sort-split groups rows by split and permutes every aligned dataset
     # (and the images) together, without changing content
     run(REPO / "optimize_h5.py", h5_f32, OUT_ROOT / "smoke_f32_sorted.h5",
@@ -439,6 +472,12 @@ def main() -> None:
         assert list(sp) == sorted(sp), "rows not grouped by split"
         order = np.argsort(s["split"][:], kind="stable")
         assert np.array_equal(f["labels"][:], s["labels"][:][order])
+        for k in ("confidence", "nodata_filled"):
+            assert np.array_equal(f[k][:], s[k][:][order]), f"{k} not permuted"
+        new_row = np.empty(len(order), np.int64)
+        new_row[order] = np.arange(len(order))
+        assert np.array_equal(f["mask_sample"][:], new_row[s["mask_sample"][:]]), \
+            "mask rows not remapped"
         assert np.array_equal(f["images"][:16], s["images"][:][order][:16]), \
             "sort-split misaligned images vs labels"
 

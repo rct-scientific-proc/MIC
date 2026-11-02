@@ -24,7 +24,11 @@ def make_dataset(
     channels: int = 1,
     seed: int = 0,
     dtype: str = "uint8",
+    confidence: bool = True,
 ) -> None:
+    """Write the synthetic file. `confidence` adds GeoLabeller's optional
+    per-row rating column: genuine samples rated 1-5 at random with about
+    one in six left unrated (0), hard negatives always 0."""
     rng = np.random.default_rng(seed)
     class_names = [f"band{i}" for i in range(num_genuine_classes)] + ["hard_negative"]
     hn_index = num_genuine_classes
@@ -72,6 +76,11 @@ def make_dataset(
         f["gt"] = gt
         f["split"] = splits
         f["classes"] = np.array(class_names, dtype=object)
+        if confidence:
+            conf = rng.integers(1, 6, len(labels))
+            conf[rng.random(len(labels)) < 1 / 6] = 0  # unrated
+            conf[~gt] = 0  # hard negatives carry no rating
+            f["confidence"] = conf.astype(np.uint8)
 
     counts = {s: int((splits == s).sum()) for s in (0, 1, 2)}
     print(f"wrote {path}: {len(labels)} samples {images.shape[1:]}, "
@@ -89,9 +98,12 @@ def main() -> None:
     p.add_argument("--size", type=int, default=28, help="image height/width")
     p.add_argument("--channels", type=int, choices=(1, 3), default=1)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-confidence", action="store_true",
+                   help="leave out the optional 'confidence' rating column")
     args = p.parse_args()
     make_dataset(args.out, args.num_classes, args.genuine_per_class,
-                 args.hn_factor, (args.size, args.size), args.channels, args.seed)
+                 args.hn_factor, (args.size, args.size), args.channels, args.seed,
+                 confidence=not args.no_confidence)
 
 
 if __name__ == "__main__":

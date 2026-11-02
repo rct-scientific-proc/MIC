@@ -24,9 +24,71 @@ loop feeds them to the hard-negative miner; call .mean() for the batch loss.
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
+
+from dataset import CONFIDENCE_MAX, CONFIDENCE_UNRATED
+
+
+def parse_confidence_curve(spec: str):
+    """--confidence-curve -> f mapping t in [0, 1] (the rating rescaled so 1
+    -> 0 and CONFIDENCE_MAX -> 1) to [0, 1], vectorised over numpy arrays.
+
+    linear      t
+    power:P     t ** P. P > 1 is convex: mid ratings stay near the minimum
+                weight and only the surest labels count fully; P < 1 is
+                concave: mid ratings sit near full weight and only the
+                shakiest labels lose much.
+    step:K      0 below rating K, 1 from K up - a hard cut.
+    """
+    name, _, arg = str(spec).strip().lower().partition(":")
+    if name == "linear":
+        if arg:
+            raise ValueError("linear takes no parameter")
+        return lambda t: np.asarray(t, dtype=np.float64)
+    if name == "power":
+        try:
+            p = float(arg)
+        except ValueError:
+            raise ValueError("power needs an exponent, e.g. power:2") from None
+        if not p > 0:
+            raise ValueError(f"power exponent must be > 0, got {arg}")
+        return lambda t: np.asarray(t, dtype=np.float64) ** p
+    if name == "step":
+        try:
+            k = int(arg)
+        except ValueError:
+            raise ValueError("step needs a rating, e.g. step:3") from None
+        if not 2 <= k <= CONFIDENCE_MAX:
+            raise ValueError(f"step rating must be 2..{CONFIDENCE_MAX}, got {arg}")
+        t_k = (k - 1) / (CONFIDENCE_MAX - 1)
+        return lambda t: (np.asarray(t, dtype=np.float64) >= t_k - 1e-9).astype(np.float64)
+    raise ValueError(f"unknown curve '{spec}' (linear, power:P, step:K)")
+
+
+def confidence_weights(confidence, labels, hn_index: int, min_weight: float,
+                       curve: str = "linear") -> np.ndarray:
+    """Per-sample loss weights from the labeller's confidence ratings.
+
+    A rated genuine chip weighs min_weight at rating 1 rising to 1.0 at
+    rating CONFIDENCE_MAX along the curve; unrated chips (0) and every hard
+    negative (always 0 in the file) weigh 1.0. A sure label the model gets
+    wrong costs the full loss, a doubtful one costs little - the labels
+    most likely to be wrong are the ones the model is allowed to disagree
+    with cheaply."""
+    if not 0.0 <= min_weight <= 1.0:
+        raise ValueError(f"min_weight must be in [0, 1], got {min_weight}")
+    conf = np.asarray(confidence).astype(np.int64)
+    labels = np.asarray(labels)
+    if conf.size and (conf.min() < CONFIDENCE_UNRATED or conf.max() > CONFIDENCE_MAX):
+        raise ValueError(f"confidence values must be {CONFIDENCE_UNRATED}..{CONFIDENCE_MAX}")
+    f = parse_confidence_curve(curve)
+    t = (np.clip(conf, 1, CONFIDENCE_MAX) - 1) / (CONFIDENCE_MAX - 1)
+    w = min_weight + (1.0 - min_weight) * f(t)
+    rated = (conf > CONFIDENCE_UNRATED) & (labels != hn_index)
+    return np.where(rated, w, 1.0).astype(np.float32)
 
 
 class FocalLoss(nn.Module):

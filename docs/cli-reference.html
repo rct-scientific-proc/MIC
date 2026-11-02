@@ -932,6 +932,48 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     keep the default alpha of 1.</p>
   </div>
 
+  <div class="arg" id="t-confidence-weight">
+    <div class="arg-head"><span class="flag">--confidence-weight</span><span class="badge">MIN · float 0–1</span><span class="badge">default: off</span></div>
+    <p>Weight each training chip's loss by the <strong>labeller's confidence
+    rating</strong> — the optional per-row <code>confidence</code> column
+    GeoLabeller's HDF5 export writes once labels are rated in its Snippet
+    Editor: 1 (lowest) to 5 (highest), 0 for an unrated label, and 0 for
+    every hard negative. A rating of 5 weighs <code>1.0</code>, a rating of
+    1 weighs <code>MIN</code>, ratings in between follow
+    <code>--confidence-curve</code>; <strong>unrated chips and all hard
+    negatives weigh 1.0</strong>, so the option changes nothing for a file
+    nobody has rated and never touches the hard-negative side. The point:
+    a label the labeller doubted is the label most likely to be wrong, so
+    the model may disagree with it cheaply, while getting a sure label
+    wrong costs the full focal loss. (The reverse — pushing hardest on the
+    doubtful labels — would amplify label noise; model difficulty is a
+    different quantity, and the miner already measures that.)</p>
+    <p>Mechanics: the weights multiply the per-sample focal loss and the
+    batch loss is their weighted mean (normalised by the weight sum, so
+    the loss scale and learning rate stay comparable to an unweighted
+    run), in the main loop and the cRT phase alike. Validation, the
+    threshold sweep, the miner's difficulties and every metric stay
+    unweighted. The mapping is printed at start-up
+    (<code>5-&gt;1.00 4-&gt;0.80 ... 1-&gt;0.20; unrated and hard negatives
+    1.00; N of M training genuine chips rated</code>), the dataset summary
+    lists the rating counts, and a file without the column trains
+    unweighted after a note. <code>MIN 0</code> removes rating-1 chips from
+    the gradient entirely.</p>
+  </div>
+
+  <div class="arg" id="t-confidence-curve">
+    <div class="arg-head"><span class="flag">--confidence-curve</span><span class="badge">linear · power:P · step:K</span><span class="badge">default: linear</span></div>
+    <p>Shape of the rating → weight mapping between <code>MIN</code> (rating
+    1) and <code>1.0</code> (rating 5), over <code>t = (rating − 1) / 4</code>:</p>
+    <div class="formula">linear     MIN + (1 − MIN) · t              1→MIN  2→.25  3→.50  4→.75  5→1   (of the span)
+power:P    MIN + (1 − MIN) · t^P            P=2: 3→.25 of the span — only the surest labels count fully
+                                            P=0.5: 3→.71 of the span — only the shakiest lose much
+step:K     MIN below rating K, 1.0 from K   step:3 — a hard cut between "doubtful" and "trusted"</div>
+    <p>Requires <code>--confidence-weight</code>. A malformed spec
+    (<code>power</code> without an exponent, <code>step:1</code>) is
+    refused at parse time.</p>
+  </div>
+
   <h3>Hard-negative pressure ramp</h3>
   <p class="syn">One coordinated schedule for "start recall-focused, then turn up the
   pressure". Both endpoints interpolate linearly over <code>--ramp-epochs</code>
@@ -2165,6 +2207,20 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
   (gzip-compressed) stream slowly — rewrite them with
   <code>optimize_h5.py</code>, or simply regenerate.</p>
 
+  <h3>Optional per-row columns</h3>
+  <p class="syn">Beyond the required <code>images</code> / <code>labels</code>
+  / <code>gt</code> / <code>split</code> / <code>classes</code>, a file may
+  carry more datasets aligned to the images' rows. Two are read:
+  <code>removed</code> (curate.py's mask; every loader skips flagged rows)
+  and <code>confidence</code> (GeoLabeller's 1–5 labeller rating, 0 =
+  unrated and every hard negative; <code>validate_h5</code> checks its
+  length and range, the dataset summary counts the ratings, and
+  <code>--confidence-weight</code> turns it into loss weights). Anything
+  else aligned to rows — GeoLabeller's <code>orientation_*</code>,
+  <code>nodata_filled</code>, <code>locations</code>, <code>object_ids</code>,
+  its mask table — is ignored by training but carried intact by
+  <code>optimize_h5.py</code>.</p>
+
   <h3>h5 image dtypes &amp; grayscale storage</h3>
   <p class="syn">The <code>images</code> dataset may use any of four dtypes;
   the pixel range each is expected to hold:</p>
@@ -2235,7 +2291,18 @@ float32   0.0 – 1.0    already-scaled floats — 4x the disk/IO of uint8</div>
   default-chunked gzip source, with byte-identical pixels and metadata. The
   output is validated and a before/after size + read-throughput comparison is
   printed. <code>--compression gzip/lzf</code> trades read speed for disk
-  (written with per-image chunks so reads stay sane).</p>
+  (written with per-image chunks so reads stay sane). <strong>Nothing is
+  dropped:</strong> every dataset aligned to the images' rows — the
+  required <code>labels</code> / <code>gt</code> / <code>split</code>,
+  curate's <code>removed</code>, and whatever the writer added (GeoLabeller's
+  <code>confidence</code>, <code>orientation_*</code>,
+  <code>nodata_filled</code>, <code>locations</code>,
+  <code>object_ids</code>, …) — follows the same row order, GeoLabeller's
+  mask table (<code>mask_pixels</code> / <code>mask_sample</code> /
+  <code>mask_names</code>, keyed by image row) is carried with its row
+  keys remapped (and resized nearest-neighbour under <code>--resize</code>),
+  and the file's attributes (the export settings) travel along; the
+  console lists what was carried.</p>
   <p><code>--resize N</code> optionally resizes every image to NxN (batched
   through the GPU when available). Worthwhile when sources are
   <em>larger</em> than the size you train at — the file shrinks and
