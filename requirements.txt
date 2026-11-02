@@ -1,9 +1,9 @@
-h5py>=3.10
-matplotlib>=3.8
-torch>=2.2
-torchvision>=0.17
-torchmetrics>=1.3
-tqdm>=4.66
+h5py
+matplotlib
+torch
+torchvision
+torchmetrics
+tqdm
 fpdf2
-Pillow>=10
-pillow
+Pillow
+optuna
