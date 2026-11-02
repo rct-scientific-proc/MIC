@@ -470,10 +470,25 @@ def read_scene(path, in_channels: int, grayscale: bool) -> np.ndarray:
     pipeline's model-input scale. 3-channel models read through PIL (RGB,
     or L -> 1 channel, replicated to 3 later); multi-band models read every
     band natively through rasterio (any GDAL raster), with uint16/float
-    handled exactly as a training file of that dtype would be."""
+    handled exactly as a training file of that dtype would be.
+
+    Single-band 16-bit and float images (PIL modes I;16*, I, F - 16-bit
+    PNG/TIFF scans, radiometric products) bypass PIL's mode conversion:
+    convert("L") CLIPS every value above 255 to white instead of scaling,
+    which would hand a model trained on uint16 snippets a saturated scene.
+    Their arrays take the training loader's own dtype scaling instead
+    (uint16 / 65535, float as stored), so a 16-bit scene and its training
+    file reach the network identically."""
     if in_channels == 3:
-        pil = Image.open(path).convert("L" if grayscale else "RGB")
-        arr = np.asarray(pil)
+        with Image.open(path) as pil:
+            if pil.mode.startswith("I;16") or pil.mode in ("I", "F"):
+                arr = np.asarray(pil)
+                if arr.dtype.kind in "iu":  # 16-bit data, maybe in a 32-bit container
+                    arr = arr.clip(0, 65535).astype(np.uint16)
+                else:
+                    arr = arr.astype(np.float32)
+                return to_model_input(arr)[:, :, None]
+            arr = np.asarray(pil.convert("L" if grayscale else "RGB"))
         return arr[:, :, None] if arr.ndim == 2 else arr
     try:
         import rasterio

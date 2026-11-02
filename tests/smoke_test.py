@@ -347,6 +347,38 @@ def main() -> None:
         "--seed", "1", "--no-progress", *GPU_TRAIN)
     assert (OUT_ROOT / "run_u16" / "metrics.csv").exists()
 
+    # a 16-bit single-band scene through that uint16-trained model: the
+    # loader must scale it like the training file (Pillow's convert("L")
+    # would clip it to white). The same content as 8-bit and 16-bit PNGs
+    # must load identically; then the CLI runs on it with --gt
+    from inference import read_scene
+    rng16 = np.random.default_rng(11)
+    s8 = (79 + rng16.integers(-20, 21, (256, 256))).clip(0, 255)   # midpoint bg
+    s8[32:96, 32:96] = (30 + rng16.integers(-20, 21, (64, 64))).clip(0, 255)
+    s8[160:224, 160:224] = (225 + rng16.integers(-20, 21, (64, 64))).clip(0, 255)
+    s8 = s8.astype(np.uint8)
+    scenes16 = OUT_ROOT / "scenes16"
+    scenes16.mkdir()
+    Image.fromarray(s8).save(scenes16 / "scene8.png")
+    Image.fromarray(s8.astype(np.uint16) * 257).save(scenes16 / "scene16.png")
+    a16 = read_scene(scenes16 / "scene16.png", 3, grayscale=True)
+    a8 = read_scene(scenes16 / "scene8.png", 3, grayscale=True)
+    assert a16.dtype == np.float32 and a16.shape == (256, 256, 1), (a16.dtype, a16.shape)
+    assert np.abs(a16 * 255.0 - a8.astype(np.float32)).max() < 0.01, \
+        "16-bit scene not scaled like a uint16 training file"
+    gt16 = OUT_ROOT / "gt16.json"
+    gt16.write_text(json.dumps({"version": "3.2", "classes": ["band0", "band2"], "images": [{
+        "path": "D:\\labeller\\scene16.png", "name": "scene16",
+        "original_width": 256, "original_height": 256,
+        "labels": [{"id": 1, "class_name": "band0", "pixel_x": 64 / 256, "pixel_y": 64 / 256},
+                   {"id": 2, "class_name": "band2", "pixel_x": 192 / 256, "pixel_y": 192 / 256}]}]}))
+    out_inf16 = OUT_ROOT / "inference_u16"
+    run(REPO / "inference.py", OUT_ROOT / "run_u16", scenes16 / "scene16.png",
+        "--window-width", "64", "--window-height", "64", "--stride-x", "32",
+        "--grayscale", "--gt", gt16, "--out-dir", out_inf16, "--no-progress", *GPU)
+    assert (out_inf16 / "detections.csv").exists() and (out_inf16 / "gt_results.csv").exists()
+    assert list(out_inf16.glob("report_*.pdf")), "missing 16-bit inference report"
+
     import h5py
     import numpy as np
     h5_f32 = OUT_ROOT / "smoke_f32.h5"

@@ -1663,7 +1663,12 @@ POST_RESIZE = {"gridmask"}   # gridmask acts on the float model-scale tensor</di
     png/jpg/jpeg/bmp/tif/tiff — top level only unless
     <code>--recursive</code>). For 3-channel checkpoints each file is loaded
     whole with Pillow and converted to RGB (or grayscale with
-    <code>--grayscale</code>). For a checkpoint trained on any other band
+    <code>--grayscale</code>) — except single-band <strong>16-bit and
+    float</strong> images (16-bit PNG/TIFF scans, radiometric products),
+    which are read at full depth and scaled exactly as a uint16 / float
+    training file is (divided by 65535, float as stored); Pillow's own 8-bit
+    conversion would clip everything above 255 to white, so a model trained
+    on uint16 snippets would see a saturated scene. For a checkpoint trained on any other band
     count (<code>in_channels</code> ≠ 3), every band is read natively through
     <strong>rasterio</strong> instead — any GDAL raster, keeping the stored
     dtype so 16-bit or float scenes are scaled exactly as a training file of
