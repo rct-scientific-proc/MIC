@@ -925,10 +925,6 @@ def train(args, on_epoch_end=None) -> dict:
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     amp = args.amp and device.type == "cuda"
-    if device.type == "cuda":
-        # input shapes are fixed per run: let cuDNN time its kernel choices
-        # once per shape instead of using heuristics
-        torch.backends.cudnn.benchmark = True
 
     out_dir = Path(args.out_dir or f"runs/{datetime.now():%Y%m%d_%H%M%S}")
     out_dir.mkdir(parents=True, exist_ok=True)
