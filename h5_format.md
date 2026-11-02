@@ -32,7 +32,9 @@ expected to hold:
 | `float32` | 0.0 – 1.0            | Already-scaled floats. 4x the disk/IO of uint8 - use only when the data truly has more than 8 bits of dynamic range. |
 
 `validate_h5` rejects any other dtype, and rejects float files whose sampled
-values fall outside [0, 1]. All dtypes reach the model as float32 in [0, 1],
+values fall outside [0, 1] - native-unit floats (dB, metres) must be scaled
+with one fixed range for the whole dataset before the file is built, since
+every sample reaches the network as stored. All dtypes reach the model as float32 in [0, 1],
 so models are interchangeable across storage dtypes of the same imagery.
 Training-time augmentations see uint8 files at 0-255 and everything else as
 float32 [0, 1] (the plugin contract in example_augment_plugin.py covers

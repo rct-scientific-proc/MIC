@@ -392,8 +392,19 @@ def validate_h5(path: str) -> dict:
             lo, hi = float(sample.min()), float(sample.max())
             if lo < -0.01 or hi > 1.01:
                 raise ValueError(
-                    f"{path}: float images must be scaled to [0, 1]; a "
-                    f"sample spans [{lo:.4g}, {hi:.4g}]")
+                    f"{path}: the images are stored as {dt.name} and hold "
+                    f"values from {lo:.4g} to {hi:.4g}, but float imagery "
+                    "(float16 / float32) must be scaled to the range 0 to 1 "
+                    "before it can be trained on. Every sample is fed to the "
+                    "network as stored: the pretrained weights, the "
+                    "augmentations and the decision thresholds all take 0 as "
+                    "the darkest value and 1 as the brightest, so other "
+                    "ranges train a different model from the one these tools "
+                    "assume. Scale the pixels when the file is built, with "
+                    "ONE fixed range for the whole dataset - for example "
+                    "(value - low) / (high - low), clipped to 0..1 - or store "
+                    "integer imagery as uint8 (0-255) or uint16 (0-65535), "
+                    "which the loader scales itself.")
 
         classes = f["classes"].asstr()[:]
         if classes[-1] != HARD_NEGATIVE_NAME:
