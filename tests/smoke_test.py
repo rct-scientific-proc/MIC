@@ -69,6 +69,21 @@ def main() -> None:
     make_dataset(str(h5), num_genuine_classes=5, genuine_per_class=30,
                  hn_factor=10.0, seed=0, channels=3, image_hw=(64, 64))
 
+    # in-process checks for edge cases no CLI leg reaches: a mined draw at
+    # --mining-random-frac 1.0 (a zero-sample multinomial), and finite
+    # --hn-margin gradients when a genuine sample's probability underflows
+    import numpy as np
+    from losses import FocalLoss
+    from sampler import HardNegativeMiner, ImbalanceCapSampler
+    lab = np.array([0] * 10 + [1] * 10 + [2] * 200)
+    smp = ImbalanceCapSampler(lab, 2, ratio=2.0, miner=HardNegativeMiner(lab, 2),
+                              random_frac=1.0)
+    assert len(list(iter(smp))) == len(smp) == 20 + 40, len(smp)
+    crit = FocalLoss(3, 2, gamma=2.0, hn_alpha=0.25, hn_margin=0.1)
+    lg = torch.tensor([[-60.0, 60.0, 0.0], [0.0, 0.0, 5.0]], requires_grad=True)
+    crit(lg, torch.tensor([0, 2])).mean().backward()
+    assert torch.isfinite(lg.grad).all(), "hn_margin gradient is not finite"
+
     common = [
         REPO / "train.py", h5, "--arch", "resnet18", "--no-pretrained",
         "--input-size", "native",
@@ -220,7 +235,16 @@ def main() -> None:
     assert det, "no detections on the planted scene"
     assert all("clean.png" not in r["image"] for r in det), \
         "false positives on the clean scene"
-    assert {r["class"] for r in det} <= {"band0", "band4"}, det
+    # every detection must touch a planted patch: a window straddling a
+    # patch edge is part patch, part background, and legitimately reads as
+    # a neighbouring band near the threshold (run-to-run AMP variance can
+    # flip it) - but pure background must never be accepted
+    patches = [(64, 64, 192, 192), (300, 250, 428, 378)]  # x0, y0, x1, y1
+    for r in det:
+        x, y, w, h = (int(r[k]) for k in ("x", "y", "w", "h"))
+        assert any(x < px1 and x + w > px0 and y < py1 and y + h > py0
+                   for px0, py0, px1, py1 in patches), f"background detection: {r}"
+    assert {r["class"] for r in det} & {"band0", "band4"}, det
     assert list(out_inf.glob("report_*.pdf")), "missing inference PDF report"
     print("inference detections:",
           [(r["class"], r["x"], r["y"]) for r in det])

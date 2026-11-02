@@ -78,8 +78,13 @@ class FocalLoss(nn.Module):
             # ASL probability shift for hard negatives: p_y + m, capped at
             # 1, so a negative rejected with margin to spare drops out.
             # Its log is taken from the shifted probability (>= m > 0, so
-            # it is safe without the log-softmax path).
+            # it is safe without the log-softmax path). The clamp below is
+            # a no-op for hard negatives; it protects the genuine samples,
+            # whose branch torch.where discards but still differentiates:
+            # a genuine p_y that underflowed to 0 would turn log(0) into a
+            # NaN gradient for the whole batch.
             is_hn = targets == self.hard_negative_index
             p_y = torch.where(is_hn, (p_y + self.hn_margin).clamp(max=1.0), p_y)
-            log_p_y = torch.where(is_hn, torch.log(p_y), log_p_y)
+            log_p_y = torch.where(is_hn, torch.log(p_y.clamp(min=self.hn_margin)),
+                                  log_p_y)
         return -self.alpha[targets] * (1 - p_y).pow(self.gammas[targets]) * log_p_y

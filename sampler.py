@@ -51,13 +51,6 @@ class HardNegativeMiner:
     def state_dict(self) -> dict:
         return {"scores": self.scores.copy(), "seen": self.seen.copy(), "ema_decay": self.ema_decay}
 
-    def hardest(self, n: int) -> np.ndarray:
-        """Training-split positions of the n hardest hard negatives seen so
-        far (highest difficulty EMA first)."""
-        cand = np.flatnonzero(self.is_hn & self.seen)
-        order = np.argsort(-self.scores[cand], kind="stable")
-        return cand[order[:n]]
-
     def load_state_dict(self, state: dict) -> None:
         self.scores = np.asarray(state["scores"], dtype=np.float64).copy()
         self.seen = np.asarray(state["seen"], dtype=bool).copy()
@@ -183,11 +176,11 @@ class ImbalanceCapSampler(Sampler[int]):
         with repeat r appears r times per epoch (its samples are duplicated,
         not resampled). The hard-negative budget stays keyed to the UNIQUE
         genuine count, so oversampling never inflates hard-negative volume."""
-        repeats = {c: int(r) for c, r in (repeats or {}).items() if int(r) > 1}
+        repeats = {c: int(r) for c, r in (repeats or {}).items()}
         for r in repeats.values():
             if r < 1:
                 raise ValueError("repeat factors must be >= 1")
-        self.genuine_repeats = repeats
+        self.genuine_repeats = {c: r for c, r in repeats.items() if r > 1}
 
     def _genuine_epoch_positions(self) -> np.ndarray:
         parts = [self.genuine_pos]
@@ -213,6 +206,9 @@ class ImbalanceCapSampler(Sampler[int]):
 
         n_random = int(round(self.random_frac * budget))
         n_mined = budget - n_random
+        if n_mined <= 0:  # random_frac 1.0: the whole budget is uniform
+            perm = torch.randperm(len(self.hn_pos), generator=gen).numpy()
+            return self.hn_pos[perm[:budget]]
 
         weights = torch.from_numpy(self.miner.scores[self.hn_pos] + 1e-8)
         mined_local = torch.multinomial(weights, n_mined, replacement=False, generator=gen).numpy()
