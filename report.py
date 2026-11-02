@@ -35,7 +35,7 @@ from dataset import (SPLIT_NAMES, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
 from metrics import (apply_threshold, calibration_bins, collect_probs,
                      final_prediction, genuine_vs_hn_roc, genuineness_scores,
                      non_hn_argmax, per_class_ovr_roc)
-from model import build_model
+from model import build_model, to_device
 from sampler import MINED_CSV, write_mined_csv
 from plots import (plot_calibration, plot_confusion, plot_confusion_grid,
                    plot_controller_timeline, plot_genuine_vs_hn_roc,
@@ -439,8 +439,8 @@ def build_report(run_dir, h5_path, split: int = SPLIT_VAL, thumbs: int = 16,
     # ---- inference with the stored operating point (skipped when the
     # caller already ran it) -------------------------------------------------
     if probs is None or labels is None:
-        model = build_model(best["arch"], len(classes), pretrained=False,
-                            in_channels=best.get("in_channels", 3)).to(dev)
+        model = to_device(build_model(best["arch"], len(classes), pretrained=False,
+                                      in_channels=best.get("in_channels", 3)), dev)
         model.load_state_dict(best["model_state"])
         ds = H5SnippetDataset(str(h5_path), split,
                               imagenet_norm=best["imagenet_norm"],

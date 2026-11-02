@@ -42,7 +42,8 @@ from dataset import (AUGMENTATIONS, SPLIT_TRAIN, SPLIT_VAL, H5SnippetDataset,
 from losses import FocalLoss
 from metrics import (RECALL_AGGREGATES, collect_probs, genuine_vs_hn_roc,
                      sweep_class_thresholds, sweep_threshold)
-from model import ARCHS, build_model, init_classifier_prior, set_backbone_trainable
+from model import (ARCHS, build_model, init_classifier_prior,
+                   set_backbone_trainable, to_device)
 from sampler import (MINED_CSV, ClassBalancedSampler, HardNegativeMiner,
                      ImbalanceCapSampler, write_mined_csv)
 
@@ -723,13 +724,34 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+# Batches between host syncs in train_one_epoch. Reading the loss back
+# with float() and shipping the miner's difficulties to the CPU every step
+# made the CPU wait for the GPU each batch instead of queuing the next
+# kernels and loading the next batch; keeping both on the device and
+# transferring once per flush measured 20% faster steps (resnet18, 64 px,
+# AMP) before the channels_last gain in model.to_device.
+HOST_SYNC_EVERY = 32
+
+
 def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
                     miner=None, ema_model=None, desc: str = "train",
                     progress: bool = True) -> float:
     model.train()
-    total_loss, total_n = 0.0, 0
+    total_loss = torch.zeros((), device=device)
+    total_n = 0
+    pending_idx: list[torch.Tensor] = []   # miner updates awaiting one transfer
+    pending_diff: list[torch.Tensor] = []
+
+    def flush_miner():
+        if pending_idx:
+            # hard negatives are drawn without replacement, so an index never
+            # repeats within an epoch and the EMA update is order-free
+            miner.update(torch.cat(pending_idx), torch.cat(pending_diff))
+            pending_idx.clear()
+            pending_diff.clear()
+
     bar = tqdm(loader, desc=desc, unit="batch", leave=False, disable=not progress)
-    for imgs, labs, idxs in bar:
+    for step, (imgs, labs, idxs) in enumerate(bar, start=1):
         imgs = imgs.to(device, non_blocking=True)
         labs = labs.to(device, non_blocking=True)
 
@@ -751,12 +773,17 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device, amp,
             with torch.no_grad():
                 p_y = torch.softmax(logits.float(), dim=1).gather(
                     1, labs.unsqueeze(1)).squeeze(1)
-            miner.update(idxs, 1.0 - p_y)
+            pending_idx.append(idxs)
+            pending_diff.append(1.0 - p_y)
 
-        total_loss += float(loss.detach()) * len(labs)
+        total_loss += loss.detach() * len(labs)
         total_n += len(labs)
-        bar.set_postfix(loss=f"{total_loss / total_n:.4f}")
-    return total_loss / max(total_n, 1)
+        if step % HOST_SYNC_EVERY == 0:
+            flush_miner()
+            if progress:
+                bar.set_postfix(loss=f"{float(total_loss) / total_n:.4f}")
+    flush_miner()
+    return float(total_loss) / max(total_n, 1)
 
 
 def pressure_values(args, f: float, n_genuine: int, n_hn: int) -> tuple[float, float]:
@@ -894,6 +921,10 @@ def train(args, on_epoch_end=None) -> dict:
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     amp = args.amp and device.type == "cuda"
+    if device.type == "cuda":
+        # input shapes are fixed per run: let cuDNN time its kernel choices
+        # once per shape instead of using heuristics
+        torch.backends.cudnn.benchmark = True
 
     out_dir = Path(args.out_dir or f"runs/{datetime.now():%Y%m%d_%H%M%S}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -962,9 +993,10 @@ def train(args, on_epoch_end=None) -> dict:
                               **loader_kw)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, **loader_kw)
 
-    model = build_model(args.arch, len(classes), pretrained=not args.no_pretrained,
-                        weights_path=args.weights_path,
-                        in_channels=in_channels).to(device)
+    model = to_device(build_model(args.arch, len(classes),
+                                  pretrained=not args.no_pretrained,
+                                  weights_path=args.weights_path,
+                                  in_channels=in_channels), device)
     if args.logit_adjust < 0:
         raise SystemExit("--logit-adjust must be >= 0")
     if args.logit_adjust > 0:

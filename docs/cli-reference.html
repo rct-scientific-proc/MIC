@@ -628,6 +628,16 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     <code>inference.py</code> runs under AMP by default, thresholds swept
     under AMP match the scores inference actually produces. The scaler state
     is checkpointed and restored on resume.</p>
+    <p>Two CUDA-side throughput settings need no flag: the model runs in
+    <code>channels_last</code> memory format (cuDNN's tensor-core
+    convolutions take NHWC natively; evaluate, report and inference use it
+    too) with cuDNN autotuning on (input shapes are fixed per run; neutral
+    at 64 px in our measurement, it usually earns a few percent at larger
+    inputs), and the training loop reads its running loss and the miner's
+    difficulties back from the GPU once every 32 batches instead of after
+    every step, so the CPU keeps loading the next batch while the GPU
+    computes. Deferred syncs and channels_last together measured ~35%
+    shorter training steps for resnet18 at 64 px under AMP.</p>
   </div>
 
   <div class="arg" id="t-patience">

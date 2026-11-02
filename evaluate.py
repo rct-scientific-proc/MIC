@@ -33,7 +33,7 @@ from checkpoints import find_checkpoint, load_checkpoint
 from dataset import SPLIT_NAMES, SPLIT_TEST, H5SnippetDataset, validate_h5
 from metrics import (apply_threshold, calibration_bins, collect_probs,
                      final_prediction, genuine_vs_hn_roc, per_class_ovr_roc)
-from model import build_model
+from model import build_model, to_device
 from plots import (plot_calibration, plot_confusion, plot_genuine_vs_hn_roc,
                    plot_history, plot_per_class_rocs)
 
@@ -95,8 +95,8 @@ def main(argv=None) -> None:
     per_class = threshold_mode == "per-class" and class_thresholds is not None
     operating = class_thresholds if per_class else threshold
 
-    model = build_model(ckpt["arch"], len(classes), pretrained=False,
-                        in_channels=ckpt.get("in_channels", 3)).to(device)
+    model = to_device(build_model(ckpt["arch"], len(classes), pretrained=False,
+                                  in_channels=ckpt.get("in_channels", 3)), device)
     model.load_state_dict(ckpt["model_state"])
 
     ds = H5SnippetDataset(args.h5, args.split, imagenet_norm=ckpt["imagenet_norm"],

@@ -42,7 +42,7 @@ from checkpoints import find_checkpoint, load_checkpoint, utc_stamp
 from dataset import (RESNET_INPUT_SIZE, build_transform, set_display_channel,
                      to_display_uint8, to_model_input)
 from metrics import _per_sample_thresholds, genuineness_scores, non_hn_argmax
-from model import build_model
+from model import build_model, to_device
 from plots import (SERIES, plot_confusion_grid, plot_per_class_rocs,
                    plot_sample_grid, plot_score_split)
 
@@ -1052,8 +1052,8 @@ def main(argv=None) -> None:
         set_display_channel(display_channel, 1 if args.grayscale else in_channels)
     except ValueError as e:
         raise SystemExit(str(e))
-    model = build_model(ckpt["arch"], len(classes), pretrained=False,
-                        in_channels=in_channels).to(device)
+    model = to_device(build_model(ckpt["arch"], len(classes), pretrained=False,
+                                  in_channels=in_channels), device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
     input_hw = tuple(int(v) for v in (ckpt.get("input_size")
