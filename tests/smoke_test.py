@@ -129,11 +129,23 @@ def main() -> None:
     # driven entirely by it (CLI overrides only out-dir/epochs/resume)
     assert (out / "config.json").exists(), "missing resolved config.json"
     out_cfg = OUT_ROOT / "run_config"
+    # ... plus one classifier re-training epoch on top: the main epoch
+    # trains under a manual --class-alpha, the cRT epoch must log uniform
+    # weights (alpha 1 for every class, hn_alpha 1) and the event 'crt'
     run(REPO / "train.py", "--config", out / "config.json",
         "--out-dir", out_cfg, "--epochs", "21", "--resume", out,
-        "--no-report")
+        "--class-alpha", "band0=2.0", "--crt-epochs", "1", "--no-report")
     assert (out_cfg / "metrics.csv").exists()
     assert (out_cfg / "config.json").exists()
+    m_rows = list(csv.DictReader(open(out_cfg / "metrics.csv")))
+    assert [r["epoch"] for r in m_rows] == ["20", "21"], [r["epoch"] for r in m_rows]
+    assert m_rows[-1]["event"] == "crt" and m_rows[-1]["hn_alpha"] == "1.0000", m_rows[-1]
+    alphas = {}
+    for r in csv.DictReader(open(out_cfg / "class_thresholds.csv")):
+        alphas.setdefault(r["epoch"], {})[r["class"]] = r["alpha"]
+    assert alphas["20"]["band0"] == "2.000", alphas["20"]
+    assert set(alphas["21"].values()) == {"1.000"}, alphas["21"]
+    assert ck(out_cfg, "last").name.startswith("last_e0021"), ck(out_cfg, "last").name
 
     # short per-class-threshold leg with a floor, warm-started from the
     # trained weights (resume restores the epoch counter, so extend past it)

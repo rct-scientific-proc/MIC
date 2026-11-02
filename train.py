@@ -407,7 +407,8 @@ def build_parser() -> argparse.ArgumentParser:
     cr.add_argument("--crt-epochs", type=int, default=0, metavar="N",
                     help="classifier re-training epochs after the main run "
                          "(0 = off); each draws as many samples as a main "
-                         "epoch, balanced across classes")
+                         "epoch, balanced across classes, with uniform loss "
+                         "weights (every alpha 1, hard_negative included)")
     cr.add_argument("--crt-lr", type=float, default=None,
                     help="learning rate for the head during re-training "
                          "(default: --lr / 10)")
@@ -1322,6 +1323,11 @@ def train(args, on_epoch_end=None) -> dict:
     # ---- classifier re-training: the head alone, class-balanced draw, on
     # the best checkpoint's frozen features --------------------------------
     best_path = find_checkpoint(out_dir, "best")
+    if args.crt_epochs > crt_done and not stopped_early and best_path is None:
+        print(f"classifier re-training skipped: no best checkpoint in {out_dir} "
+              "(a run resumed into a fresh directory with no epochs left to "
+              "train writes none; resume into the original directory, or "
+              "raise --epochs)")
     if args.crt_epochs > crt_done and not stopped_early and best_path is not None:
         best_ck = load_checkpoint(best_path, device)
         model.load_state_dict(best_ck["model_state"])  # the deployed weights
@@ -1337,6 +1343,14 @@ def train(args, on_epoch_end=None) -> dict:
             g["lr"] = crt_lr
         scaler = torch.amp.GradScaler(device.type, enabled=amp)
         criterion.set_logit_offset(None)  # no skew left to adjust for
+        # uniform loss weights for the same reason: --hn-alpha, rescue
+        # boosts and --class-alpha exist to counter a skewed draw, and
+        # under a balanced draw they would only re-skew the head (a
+        # down-weighted hard_negative class = a head biased to accept)
+        criterion.set_hn_alpha(1.0)
+        class_alphas = {c: 1.0 for c in range(len(classes)) if c != hn_index}
+        criterion.set_class_alphas(class_alphas)
+        hn_alpha = 1.0
         balanced = ClassBalancedSampler(train_ds.labels, len(sampler), seed=args.seed)
         crt_loader = DataLoader(train_ds, batch_size=args.batch_size,
                                 sampler=balanced, **loader_kw)

@@ -1181,8 +1181,13 @@ repeat_c  = 1 + round((oversample_max − 1)·deficit_c) (epoch copies)</div>
   included — is drawn with equal probability (uniform over classes, then
   uniform within the class, with replacement), the backbone is frozen as
   under <code>--freeze-epochs</code>, mining and logit adjustment are off
-  (there is no skew left to correct), and each epoch is validated, swept
-  and ranked exactly like a main epoch. The best checkpoint is replaced
+  (there is no skew left to correct), the loss runs with <strong>uniform
+  class weights</strong> (alpha 1 for every class, hard_negative included —
+  <code>--hn-alpha</code>, rescue boosts and <code>--class-alpha</code>
+  exist to counter a skewed draw and would only re-skew a head fitted on a
+  balanced one; <code>class_thresholds.csv</code> logs alpha 1 for these
+  epochs), and each epoch is validated, swept and ranked exactly like a
+  main epoch. The best checkpoint is replaced
   only when a re-trained head ranks higher on the usual key, so the phase
   can never make a run worse; its epochs continue the numbering, carry
   <code>crt</code> in the metrics <code>event</code> column, and the
