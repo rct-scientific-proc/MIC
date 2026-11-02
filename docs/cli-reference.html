@@ -308,7 +308,10 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     config captures an experiment while any flag on the command line still
     overrides it for one-off variations. Values are type-coerced and validated
     against each option's choices; unknown keys are an error, and
-    <code>"inf"</code> works for the infinite ratio.</p>
+    <code>"inf"</code> works for the infinite ratio. On an optional-value
+    flag (<code>--ema</code>, <code>--smart</code>, <code>--recall-first</code>,
+    <code>--class-alpha-auto</code>) JSON <code>true</code> means the bare
+    flag — its bare-flag value — and <code>false</code> leaves it off.</p>
     <div class="formula">{
   "h5": "data.h5",
   "smart": 4,
@@ -674,7 +677,11 @@ min       worst single class              (1,1,1,1,0.1) → 0.10</div>
     the run picks up as if uninterrupted. Point <code>--out-dir</code> at the same
     directory to keep one continuous <code>metrics.csv</code>. Hyperparameters are
     <em>not</em> read back from the checkpoint: pass the same flags again (or
-    deliberately different ones — resuming with a changed LR is allowed).</p>
+    deliberately different ones — resuming with a changed LR is allowed).
+    Three must match the checkpoint, and a mismatch is refused up front:
+    the optimizer (its state cannot carry over), <code>--imagenet-norm</code>
+    and <code>--input-size</code> (the preprocessing regime is part of the
+    model; the stored thresholds were swept under it).</p>
   </div>
 
   <h3>Objective group</h3>

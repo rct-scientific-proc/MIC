@@ -226,7 +226,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="thumbnails per problem-sample grid in the report")
     t.add_argument("--resume", default=None,
                    help="checkpoint to resume from: a .pt file, or a run "
-                        "directory (uses its newest last_* checkpoint)")
+                        "directory (uses its newest last_* checkpoint). The "
+                        "optimizer, --imagenet-norm and --input-size must "
+                        "match the checkpoint")
 
     o = p.add_argument_group("objective")
     o.add_argument("--target-recall", type=float, default=0.95,
@@ -532,6 +534,10 @@ def _apply_config(p: argparse.ArgumentParser, args: argparse.Namespace,
             continue  # explicit CLI wins
         if value is None:
             continue  # null == not specified; keep the parser default
+        if action.nargs == "?" and isinstance(value, bool):
+            if not value:
+                continue  # false == the flag absent: keep the default
+            value = action.const  # true == the bare flag, i.e. its const
         if action.type is not None:
             if isinstance(value, str):
                 value = action.type(value)
@@ -910,7 +916,10 @@ def train(args, on_epoch_end=None) -> dict:
     for split_name, c in summary["counts"].items():
         print(f"  {split_name}: {c['genuine']} genuine, {c['hard_negative']} hard negatives")
     in_channels = model_channels(summary["channels"])
-    set_display_channel(args.display_channel, summary["channels"])  # fail early
+    try:
+        set_display_channel(args.display_channel, summary["channels"])  # fail early
+    except ValueError as e:
+        raise SystemExit(str(e))
     try:
         input_hw = parse_input_size(args.input_size, summary["image_hw"])
     except ValueError as e:
@@ -1035,6 +1044,19 @@ def train(args, on_epoch_end=None) -> dict:
                 f"--resume: checkpoint was trained with '{ck_opt}' but "
                 f"--optimizer {args.optimizer} was requested; optimizer "
                 "state cannot carry over - resume with the same optimizer")
+        ck_norm = ckpt.get("imagenet_norm")
+        if ck_norm is not None and bool(ck_norm) != bool(args.imagenet_norm):
+            raise SystemExit(
+                f"--resume: checkpoint was trained {'with' if ck_norm else 'without'}"
+                f" --imagenet-norm, this run is {'with' if args.imagenet_norm else 'without'}"
+                " it; preprocessing is part of the model - resume with the same "
+                "setting")
+        ck_size = ckpt.get("input_size")
+        if ck_size is not None and [int(v) for v in ck_size] != list(input_hw):
+            raise SystemExit(
+                f"--resume: checkpoint was trained at input size "
+                f"{ck_size[0]}x{ck_size[1]}, this run uses "
+                f"{input_hw[0]}x{input_hw[1]}; pass the same --input-size")
         load_weights(ckpt, model, ema_model)
         optimizer.load_state_dict(ckpt["optimizer_state"])
         if ckpt.get("scaler_state"):  # empty when saved without --amp
