@@ -17,7 +17,7 @@ Worthwhile when sources are LARGER than the size you train at (the file
 shrinks and the per-sample CPU resize disappears — training skips its
 resize op whenever the stored size matches its input size). When sources are smaller, pre-resizing inflates
 the file by the square of the scale factor (32px -> 224px is 49x) and can
-push it past the training RAM cache — the script warns before doing it.
+push it past what the OS page cache can hold — the script warns before doing it.
 
     python optimize_h5.py in.h5 out.h5                  # contiguous, no compression
     python optimize_h5.py in.h5 out.h5 --resize 224     # + resize to model size

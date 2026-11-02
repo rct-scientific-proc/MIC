@@ -72,7 +72,7 @@ def _txt(s) -> str:
 def _read_csv(path: Path) -> list[dict]:
     if not path.exists():
         return []
-    with open(path, newline="") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
@@ -278,8 +278,10 @@ def _class_sample_pages(h5_path, split, probs, labels, operating, hn_index,
                 if not csv_path.exists() and n_export > 0:
                     write_mined_csv(csv_path, m_scores, seen, train_ds.labels,
                                     train_ds.indices, hn_index, n_export)
-                n_csv = (sum(1 for _ in open(csv_path, encoding="utf-8")) - 1
-                         if csv_path.exists() else 0)
+                n_csv = 0
+                if csv_path.exists():
+                    with open(csv_path, encoding="utf-8") as fh:
+                        n_csv = sum(1 for _ in fh) - 1
                 miner_grid = (path, "The training hard negatives that stayed "
                                     "difficult across epochs, per the mining "
                                     "tracker, captioned with their h5 row and "

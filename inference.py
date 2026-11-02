@@ -771,11 +771,16 @@ def build_pdf(out_dir: Path, results: list[dict], classes, hn_index: int,
 
     if analytics:
         assets = out_dir / "assets"
+        # display copies of whole scenes, a few at a time: every grid draws
+        # from many images, and one full-size RGB copy per scene adds up
         img_cache: dict = {}
+        cache_scenes = 8
 
         def crop_of(row) -> np.ndarray:
             ri = row["img"]
             if ri not in img_cache:  # display form: uint8, 1 or 3 channels
+                if len(img_cache) >= cache_scenes:
+                    del img_cache[next(iter(img_cache))]  # the oldest entry
                 img_cache[ri] = to_display_uint8(read_scene(
                     results[ri]["path"], getattr(args, "in_channels", 3),
                     args.grayscale))
@@ -1128,7 +1133,7 @@ def main(argv=None) -> None:
                 print(f"  specificity at {row['target']:.0%} recall: "
                       f"{row['specificity']:.4f} (threshold {row['threshold']:.4f})")
 
-    with open(out_dir / "detections.csv", "w", newline="") as f:
+    with open(out_dir / "detections.csv", "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["image", "x", "y", "w", "h", "class", "score"])
         for r in results:
@@ -1137,7 +1142,8 @@ def main(argv=None) -> None:
                                  classes[d["class_index"]], f"{d['score']:.6f}"])
 
     if gt_lookup is not None:
-        with open(out_dir / "gt_results.csv", "w", newline="") as f:
+        with open(out_dir / "gt_results.csv", "w", newline="",
+                  encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["image", "label_id", "class", "x", "y", "hit",
                              "best_score", "known_class"])

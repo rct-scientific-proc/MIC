@@ -101,6 +101,11 @@ def main(argv=None) -> None:
 
     ds = H5SnippetDataset(args.h5, args.split, imagenet_norm=ckpt["imagenet_norm"],
                           input_size=ckpt.get("input_size"))
+    if ds.in_channels != ckpt.get("in_channels", 3):
+        raise SystemExit(
+            f"{args.h5} stores {ds.channels}-channel images ({ds.in_channels}-channel "
+            f"model input) but the checkpoint was trained on "
+            f"{ckpt.get('in_channels', 3)}-channel input")
     loader = DataLoader(ds, batch_size=args.batch_size, num_workers=args.workers,
                         pin_memory=device.type == "cuda")
 

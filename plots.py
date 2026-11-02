@@ -66,6 +66,11 @@ def _save(fig, path) -> None:
     plt.close(fig)
 
 
+def _read_rows(csv_path) -> list[dict]:
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
 def plot_genuine_vs_hn_roc(fpr, tpr, auc: float, path,
                            operating_point: dict | None = None) -> None:
     """Binary genuine-vs-hard-negative ROC; x is the fraction of hard
@@ -151,7 +156,7 @@ def plot_history(csv_path, path) -> None:
     threshold) on one shared axis. Bottom panel: training loss on its own
     axis — separate panel, not a twin axis.
     """
-    rows = list(csv.DictReader(open(csv_path, newline="")))
+    rows = _read_rows(csv_path)
     if not rows:
         raise ValueError(f"{csv_path}: no rows to plot")
     epochs = [int(r["epoch"]) for r in rows]
@@ -205,7 +210,7 @@ def plot_per_class_recall_history(class_csv_path, path) -> list[str]:
     MAX_ROC_SERIES classes, keeps the worst-final-recall ones and returns the
     dropped names — callers should report them, never drop silently.
     """
-    rows = list(csv.DictReader(open(class_csv_path, newline="")))
+    rows = _read_rows(class_csv_path)
     if not rows:
         raise ValueError(f"{class_csv_path}: no rows to plot")
 
@@ -248,8 +253,7 @@ def plot_controller_timeline(csv_path, path) -> None:
     """Smart-mode controller history: pressure with boundary-event markers on
     top, cycled learning rate (log scale) below. Skips rows from non-smart
     epochs (empty pressure column)."""
-    rows = [r for r in csv.DictReader(open(csv_path, newline=""))
-            if r.get("pressure")]
+    rows = [r for r in _read_rows(csv_path) if r.get("pressure")]
     if not rows:
         raise ValueError(f"{csv_path}: no smart-mode rows to plot")
     epochs = [int(r["epoch"]) for r in rows]

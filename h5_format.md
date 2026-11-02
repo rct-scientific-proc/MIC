@@ -14,7 +14,7 @@ index mapping across all datasets.
 | `labels`  | uint16  | (N,)         | Integer class index. Look up the name via `classes[labels[i]]`. |
 | `gt`      | bool    | (N,)         | `True` = genuine example. `False` = hard negative. |
 | `split`   | uint8   | (N,)         | `0` = train, `1` = validate, `2` = test. |
-| `classes` | str     | (K,)         | Ordered list of class name strings. Last entry is always `"hard_negative"`. K = number unique labels uint16 values |
+| `classes` | str     | (K,)         | Ordered list of class name strings; `labels` indexes into it, so K is the number of distinct label values. Last entry is always `"hard_negative"`. |
 | `removed` | bool    | (N,)         | *Optional.* `True` = snippet curated out (written by `curate.py`); every loader excludes it from **all** splits. Purge permanently with `optimize_h5.py --drop-removed`. |
 
 ---

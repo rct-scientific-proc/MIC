@@ -1,4 +1,6 @@
 *.md
+!README.md
+!h5_format.md
 .venv
 __pycache__/
 *.pyc

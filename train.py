@@ -1,14 +1,18 @@
-"""Train a ResNet on an h5 snippet dataset (see h5_format.md, TODO.md).
+"""Train a ResNet on an h5 snippet dataset (layout in h5_format.md).
 
-Objective: reach the target macro recall over genuine classes, then maximize
-hard-negative specificity at that recall. The recall target is enforced by a
-per-epoch threshold sweep on the validation split; the chosen threshold is
-stored in every checkpoint alongside the weights.
+Objective: reach the target aggregated recall over genuine classes, then
+maximize hard-negative specificity at that recall. The recall target is
+enforced by a per-epoch threshold sweep on the validation split; the chosen
+threshold(s) are stored in every checkpoint alongside the weights.
 
-Outputs in --out-dir:
-    last.pt       most recent checkpoint (resumable)
-    best.pt       best by (target met, specificity, macro recall)
-    metrics.csv   per-epoch log
+Outputs in --out-dir (checkpoint names carry role, epoch, metrics and a UTC
+stamp, e.g. best_e0041_rec0.9211_spec1.0000_20260819T153042Z.pt):
+    last_*.pt             most recent checkpoint (resumable)
+    best_*.pt             best by (target met, specificity, recall)
+    metrics.csv           per-epoch log
+    class_thresholds.csv  per-epoch, per-class threshold / recall / boosts
+    config.json           the resolved options (itself a valid --config)
+    report_<stamp>.pdf    end-of-training report (--no-report to skip)
 
 Example:
     python train.py data.h5 --arch resnet18 --epochs 50 --target-recall 0.95 \
@@ -1110,7 +1114,7 @@ def train(args, on_epoch_end=None) -> dict:
 
     csv_path = out_dir / "metrics.csv"
     new_csv = not csv_path.exists()
-    csv_file = open(csv_path, "a", newline="")
+    csv_file = open(csv_path, "a", newline="", encoding="utf-8")
     writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
     if new_csv:
         writer.writeheader()
@@ -1119,7 +1123,7 @@ def train(args, on_epoch_end=None) -> dict:
     # threshold modes — the per-class recall history lives here.
     class_csv_path = out_dir / "class_thresholds.csv"
     new_class_csv = not class_csv_path.exists()
-    class_csv_file = open(class_csv_path, "a", newline="")
+    class_csv_file = open(class_csv_path, "a", newline="", encoding="utf-8")
     class_writer = csv.DictWriter(class_csv_file, fieldnames=CLASS_CSV_FIELDS)
     if new_class_csv:
         class_writer.writeheader()
@@ -1298,9 +1302,11 @@ def train(args, on_epoch_end=None) -> dict:
                 if args.patience and controller.cycles_since_best >= args.patience:
                     stop = True
 
+        # controller event first: the report's warnings and the timeline
+        # plot key on the leading word; the freeze/unfreeze note trails it
         class_thr, thr_values = log_epoch(
             epoch, train_loss, op, hn_alpha, ratio, ramp_progress, p_used,
-            cycle_used, " ".join(e for e in (freeze_event, event) if e), lr, dt,
+            cycle_used, " ".join(e for e in (event, freeze_event) if e), lr, dt,
             class_alphas, repeats_used)
 
         marker = " *" if improved else ""
