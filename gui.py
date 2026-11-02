@@ -29,6 +29,23 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent
 INSTALL_HINT = "the GUI needs PyQt5 - to run it: pip install PyQt5"
 
+
+def split_extra_args(text: str) -> list[str]:
+    """The 'extra CLI args' box -> argv tokens. POSIX quoting rules, except
+    on Windows, where shlex's POSIX mode treats every backslash as an
+    escape and C:\\runs\\exp1 would reach the CLI as C:runsexp1. There the
+    non-POSIX split keeps backslashes, and only the quotes around a quoted
+    token are stripped (shlex leaves them in place in that mode)."""
+    if os.name != "nt":
+        return shlex.split(text)
+    out = []
+    for tok in shlex.split(text, posix=False):
+        if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+            tok = tok[1:-1]
+        out.append(tok)
+    return out
+
+
 try:
     from PyQt5 import QtCore, QtGui, QtWidgets
 except ImportError:  # main() prints the hint; the module stays importable
@@ -198,7 +215,7 @@ if QtWidgets is not None:
                 a.append("--no-pretrained")
             self.opt(a, "--optuna", self.optuna.text().strip())
             self.opt(a, "--optuna-space", self.optuna_space.text())
-            a.extend(shlex.split(self.extra.text()))
+            a.extend(split_extra_args(self.extra.text()))
             a.append("--no-progress")
             return a
 
@@ -234,7 +251,7 @@ if QtWidgets is not None:
                 a.extend(["--split", self.SPLITS[self.split.currentText()]])
             self.opt(a, "--out-dir", self.out.text())
             self.combo_opt(a, "--device", self.device)
-            a.extend(shlex.split(self.extra.text()))
+            a.extend(split_extra_args(self.extra.text()))
             a.append("--no-progress")
             return a
 
@@ -294,7 +311,7 @@ if QtWidgets is not None:
             self.combo_opt(a, "--device", self.device)
             if self.grayscale.isChecked():
                 a.append("--grayscale")
-            a.extend(shlex.split(self.extra.text()))
+            a.extend(split_extra_args(self.extra.text()))
             a.append("--no-progress")
             return a
 
@@ -493,6 +510,13 @@ def _self_test(win, out_dir: Path) -> None:
     assert t.argv() == ["data.h5", "--epochs", "5", "--smart", "3", "--amp",
                         "--no-progress"], t.argv()
     assert t.missing() == []
+    # extra args: quoting works everywhere; Windows paths keep their backslashes
+    if os.name == "nt":
+        got = split_extra_args(r'--resume C:\runs\exp1 --class-alpha "band 3=2.0"')
+        assert got == ["--resume", r"C:\runs\exp1", "--class-alpha", "band 3=2.0"], got
+    else:
+        got = split_extra_args("--resume runs/exp1 --class-alpha 'band 3=2.0'")
+        assert got == ["--resume", "runs/exp1", "--class-alpha", "band 3=2.0"], got
 
     e = win.eval_tab
     assert e.missing() == ["checkpoint", "dataset (.h5)"]

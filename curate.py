@@ -286,7 +286,10 @@ if QtWidgets is not None:
             self.restore_selected() if self.in_removed_view() \
                 else self.remove_selected()
 
-        def save(self):
+        def save(self) -> bool:
+            """Write the removed mask into the h5; False (with a dialog) when
+            the file cannot be opened read-write - HDF5 locks it while a
+            training run or another viewer holds it open."""
             self._h5.close()
             try:
                 with h5py.File(self.h5_path, "r+") as f:
@@ -294,6 +297,14 @@ if QtWidgets is not None:
                         f["removed"][:] = self.removed
                     else:
                         f.create_dataset("removed", data=self.removed)
+            except OSError as e:
+                QtWidgets.QMessageBox.warning(
+                    self, "Save failed",
+                    f"Could not write {self.h5_path}:\n{e}\n\nIs a training run "
+                    "or another viewer holding the file open? Your changes are "
+                    "kept in this window - close the other process and save "
+                    "again.")
+                return False
             finally:
                 self._h5 = h5py.File(self.h5_path, "r")
             self.saved_removed = self.removed.copy()
@@ -301,6 +312,7 @@ if QtWidgets is not None:
             self.statusBar().showMessage(
                 f"saved: {int(self.removed.sum())} snippet(s) removed from "
                 "training", 6000)
+            return True
 
         def _preview(self, item):
             row = item.data(QtCore.Qt.UserRole)
@@ -327,8 +339,9 @@ if QtWidgets is not None:
                 if answer == QtWidgets.QMessageBox.Cancel:
                     event.ignore()
                     return
-                if answer == QtWidgets.QMessageBox.Save:
-                    self.save()
+                if answer == QtWidgets.QMessageBox.Save and not self.save():
+                    event.ignore()  # the file is still locked; stay open
+                    return
             self._h5.close()
             event.accept()
 
