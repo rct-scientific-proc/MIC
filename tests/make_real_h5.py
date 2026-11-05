@@ -7,13 +7,18 @@ thereafter): mnist, fashionmnist (28x28 grayscale), cifar10, cifar100
 (32x32 RGB). A random --hn-classes subset of the original classes (or an
 explicit --hn-names list) becomes the single hard_negative class — "things
 that look like objects but are not the objects we care about" — and the
-remaining classes become the genuine classes. The torchvision train split
-is carved into train/validate (stratified per class); the torchvision test
-split becomes the test split.
+remaining classes become the genuine classes. By default the torchvision
+train split is carved into train/validate (stratified per class) and the
+torchvision test split becomes the test split; --split-ratio 60,20,20
+instead pools both and splits every ORIGINAL class randomly by those
+percentages, so each genuine class and each class folded into
+hard_negative lands in train/validate/test in the same proportions.
 
     python tests/make_real_h5.py fashionmnist fashion.h5 --hn-classes 4
     python tests/make_real_h5.py cifar100 cifar.h5 --hn-classes 80 \
         --subset-per-class 200
+    python tests/make_real_h5.py cifar100 cifar.h5 --hn-classes 50 \
+        --split-ratio 60,20,20
 
 Tip: the more classes you assign to hard_negative, the closer the h5 gets
 to this pipeline's heavy-imbalance regime (cifar100 with 80+ HN classes is
@@ -79,11 +84,29 @@ def main() -> None:
                         "(keeps the h5 small for quick experiments)")
     p.add_argument("--val-frac", type=float, default=0.15,
                    help="fraction of the torchvision train split carved into "
-                        "validation (stratified per class)")
+                        "validation (stratified per class); ignored with "
+                        "--split-ratio")
+    p.add_argument("--split-ratio", default=None, metavar="TRAIN,VAL,TEST",
+                   help="pool the torchvision train and test splits and split "
+                        "every original class randomly by these percentages "
+                        "(e.g. 60,20,20) instead of keeping torchvision's "
+                        "test split")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--data-dir", default=str(Path(__file__).parent / "data"),
                    help="torchvision download/cache directory")
     args = p.parse_args()
+
+    ratio = None
+    if args.split_ratio:
+        try:
+            ratio = np.array([float(v) for v in args.split_ratio.split(",")])
+        except ValueError:
+            p.error(f"--split-ratio: expected three numbers, got '{args.split_ratio}'")
+        if ratio.shape != (3,) or (ratio < 0).any() or ratio.sum() <= 0 \
+                or ratio[0] <= 0:
+            p.error("--split-ratio needs three non-negative percentages with "
+                    "a positive train share, e.g. 60,20,20")
+        ratio = ratio / ratio.sum()
 
     rng = np.random.default_rng(args.seed)
     tr_images, tr_labels, class_names = _load_split(args.dataset, args.data_dir, True)
@@ -125,15 +148,32 @@ def main() -> None:
     tr_new = np.array([remap[c] for c in tr_labels], dtype=np.uint16)
     te_new = np.array([remap[c] for c in te_labels], dtype=np.uint16)
 
-    tr_split = np.zeros(len(tr_new), dtype=np.uint8)  # 0 train, 1 validate
-    for c in np.unique(tr_new):
-        pos = np.flatnonzero(tr_new == c)
-        rng.shuffle(pos)
-        tr_split[pos[:max(1, round(args.val_frac * len(pos)))]] = 1
+    if ratio is not None:
+        # pooled: every ORIGINAL class split by the ratio, so the classes
+        # folded into hard_negative are stratified too
+        images = np.concatenate([tr_images, te_images])
+        labels = np.concatenate([tr_new, te_new])
+        orig = np.concatenate([tr_labels, te_labels])
+        split = np.zeros(len(labels), dtype=np.uint8)
+        for c in np.unique(orig):
+            pos = np.flatnonzero(orig == c)
+            rng.shuffle(pos)
+            n_tr = int(round(ratio[0] * len(pos)))
+            n_va = int(round(ratio[1] * len(pos)))
+            split[pos[n_tr:n_tr + n_va]] = 1
+            split[pos[n_tr + n_va:]] = 2
+        print("split ratio " + "/".join(f"{v:.0%}" for v in ratio)
+              + " per original class over the pooled train+test images")
+    else:
+        tr_split = np.zeros(len(tr_new), dtype=np.uint8)  # 0 train, 1 validate
+        for c in np.unique(tr_new):
+            pos = np.flatnonzero(tr_new == c)
+            rng.shuffle(pos)
+            tr_split[pos[:max(1, round(args.val_frac * len(pos)))]] = 1
 
-    images = np.concatenate([tr_images, te_images])
-    labels = np.concatenate([tr_new, te_new])
-    split = np.concatenate([tr_split, np.full(len(te_new), 2, dtype=np.uint8)])
+        images = np.concatenate([tr_images, te_images])
+        labels = np.concatenate([tr_new, te_new])
+        split = np.concatenate([tr_split, np.full(len(te_new), 2, dtype=np.uint8)])
 
     order = rng.permutation(len(labels))  # shuffle rows; index map stays 1:1
     images, labels, split = images[order], labels[order], split[order]

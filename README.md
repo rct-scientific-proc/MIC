@@ -201,13 +201,20 @@ generated scenes.
 ```
 python tests/make_real_h5.py fashionmnist fashion.h5 --hn-classes 4
 python tests/make_real_h5.py cifar100 cifar.h5 --hn-classes 80 --subset-per-class 200
+python tests/make_real_h5.py cifar100 cifar.h5 --hn-classes 50 --split-ratio 60,20,20
 ```
 
 Downloads a torchvision dataset (mnist / fashionmnist / cifar10 / cifar100,
 cached after the first fetch) and converts it to the h5 format, relabeling a
 random `--hn-classes` subset of the original classes (or an explicit
 `--hn-names` list) as `hard_negative`. More HN classes = closer to this
-pipeline's heavy-imbalance regime.
+pipeline's heavy-imbalance regime. `--split-ratio 60,20,20` pools
+torchvision's train and test sets and splits every original class randomly
+by those percentages.
+
+`python tests/compare_archs.py cifar.h5 --out-dir runs/archs` trains
+resnet18/34/50 on that file with identical options and compares their
+checkpoints on the test split (`comparison.txt`, ROC overlay, McNemar tests).
 
 ## Georeferenced test scenes
 
